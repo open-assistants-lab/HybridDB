@@ -148,7 +148,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-Eddy Xu ([@eddyxu](https://github.com/eddyxu))
+Eddy Xu
 
 Inspired by [claude-mem](https://github.com/thedotmack/claude-mem) by [Matt Mack](https://github.com/thedotmack).
 
