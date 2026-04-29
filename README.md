@@ -1,0 +1,151 @@
+# HybridDB
+
+**SQLite + FTS5 + ChromaDB with a self-healing journal.** One Python class that gives you keyword search, vector search, SQL queries, and structured filtering — all kept in sync automatically.
+
+```python
+from hybriddb import HybridDB, SearchMode
+
+db = HybridDB("./my_data")
+db.create_table("docs", {"title": "TEXT", "body": "LONGTEXT", "tags": "JSON"})
+
+db.insert("docs", {"title": "Getting Started", "body": "A guide to using HybridDB..."})
+db.insert("docs", {"title": "API Reference", "body": "Full API documentation..."})
+
+# Keyword search
+db.search("docs", "body", "getting started", mode=SearchMode.KEYWORD)
+
+# Semantic search
+db.search("docs", "body", "how do I begin", mode=SearchMode.SEMANTIC)
+
+# Hybrid search (keyword + semantic, RRF fusion)
+db.search("docs", "body", "how to get started", mode=SearchMode.HYBRID)
+
+# Structured query
+db.query("docs", where="title LIKE ?", params=("%start%",))
+```
+
+## Why HybridDB?
+
+Every serious project that needs **both** keyword and semantic search ends up wiring SQLite + FTS5 + ChromaDB together. You handle schema creation, FTS5 triggers, ChromaDB collection management, keeping them in sync, recovering from crashes, rebuilding indexes...
+
+HybridDB does all of that once, done right.
+
+| Feature | Status |
+|---------|--------|
+| SQL CRUD (insert, update, delete, get, query) | ✅ |
+| FTS5 keyword search with BM25 scoring | ✅ |
+| ChromaDB semantic/vector search with HNSW | ✅ |
+| Hybrid search (RRF fusion of keyword + semantic) | ✅ |
+| Recency-weighted scoring | ✅ |
+| Schema management (create, add/drop/rename columns) | ✅ |
+| Self-healing journal (crash recovery) | ✅ |
+| Sync/async-friendly (thread-safe, bring your own async) | ✅ |
+| No external API dependencies (works offline) | ✅ |
+| Embedding model pluggable (sentence-transformers, OpenAI, custom) | ✅ |
+
+## Installation
+
+```bash
+pip install hybriddb
+```
+
+For real embedding quality, install with sentence-transformers:
+
+```bash
+pip install hybriddb[sentence-transformers]
+```
+
+## Core Concepts
+
+### Column Types
+
+HybridDB maps Python-friendly types to SQLite storage and automatically sets up the right search indexes:
+
+| Type | SQLite | FTS5 | ChromaDB | Use for |
+|------|--------|------|----------|---------|
+| `TEXT` | TEXT | ✅ | — | Names, titles, short strings |
+| `LONGTEXT` | TEXT | ✅ | ✅ | Documents, messages, memory content |
+| `INTEGER` | INTEGER | — | — | Counts, ages, IDs |
+| `REAL` | REAL | — | — | Prices, scores, confidence values |
+| `BOOLEAN` | INTEGER | — | — | Flags, status indicators |
+| `JSON` | TEXT | — | — | Tags, metadata, structured data |
+
+**TEXT** columns get automated FTS5 keyword search.
+**LONGTEXT** columns get FTS5 + ChromaDB semantic search.
+
+### Search Modes
+
+```python
+# Keyword only — fast, exact, great for names and titles
+db.search("contacts", "name", "Alice", mode=SearchMode.KEYWORD)
+
+# Semantic only — finds "9am standup" when searching for "morning meetings"
+db.search("memories", "content", "team rituals", mode=SearchMode.SEMANTIC)
+
+# Hybrid — best of both, RRF fusion, the default
+db.search("docs", "body", "getting started guide", mode=SearchMode.HYBRID)
+
+# Search across ALL text columns at once
+db.search_all("contacts", "engineering manager")
+```
+
+### Recency Scoring
+
+Boost recent content over older content:
+
+```python
+results = db.search(
+    "messages", "content", "project update",
+    recency_weight=0.3,        # 30% weight to recency
+    recency_column="timestamp"
+)
+```
+
+### Self-Healing Journal
+
+All ChromaDB mutations (adds, updates, deletes) are journaled in SQLite. On insert with `sync=True` (default), the journal is processed immediately. On `sync=False`, journal entries are deferred:
+
+```python
+# Batch insert — defer ChromaDB sync for speed
+db.insert_batch("contacts", big_list_of_rows, sync=False)
+db.process_journal()  # Sync everything at once
+```
+
+If your process crashes mid-write, the journal replays pending entries on next startup. No ghosts, no drift.
+
+### Health & Maintenance
+
+```python
+# Check if SQLite and ChromaDB are in sync
+health = db.health("contacts")
+# {"sqlite_rows": 5000, "chroma_docs": {"contacts_bio": 5000}, "status": "ok"}
+
+# Reconcile: delete ghosts, add missing docs
+result = db.reconcile("contacts")
+# {"ghosts_deleted": 0, "missing_added": 3, "metadata_updated": 0}
+```
+
+## Custom Embedding Models
+
+By default, HybridDB uses a deterministic hash-based embedding — works offline, no dependencies, but lower semantic quality. Plug in any embedding function:
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+db = HybridDB("./data", embedding_fn=lambda text: model.encode(text).tolist())
+```
+
+Works with any embedding provider — OpenAI, Cohere, Hugging Face, local models.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Author
+
+Eddy Vinck
+
+## Status
+
+Alpha — actively developed, API may evolve. Core CRUD and search are stable with full test coverage (35+ tests). Currently used in production in the Executive Assistant agent system.
