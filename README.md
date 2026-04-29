@@ -1,5 +1,9 @@
 # HybridDB
 
+> **Purposefully built for AI Agents.** HybridDB gives agents persistent, searchable memory — every conversation turn is indexed and retrievable via keyword, vector, or hybrid search. Used in production by the [Executive Assistant](https://github.com/open-assistants-lab) agent system.
+
+> **Embedded. Local. Open source.** No cloud APIs, no vector DB services, no internet connection required. Runs entirely on-device with SQLite + ChromaDB + your choice of local embedding model. Ships as a single Python package with zero external infrastructure dependencies.
+
 **SQLite + FTS5 + ChromaDB with a self-healing journal.** One Python class that gives you keyword search, vector search, SQL queries, and structured filtering — all kept in sync automatically.
 
 ```python
@@ -144,7 +148,9 @@ MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-Eddy Vinck
+Eddy Xu ([@eddyxu](https://github.com/eddyxu))
+
+Inspired by [claude-mem](https://github.com/thedotmack/claude-mem) by [Matt Mack](https://github.com/thedotmack).
 
 ## Status
 
