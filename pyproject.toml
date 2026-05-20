@@ -1,6 +1,6 @@
 [project]
 name = "hybriddb"
-version = "0.1.0"
+version = "0.2.0"
 description = "Embedded, local, open-source hybrid search for AI agents — SQLite + FTS5 + ChromaDB with self-healing journal"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -26,12 +26,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+analytics = [
+    "duckdb>=1.0.0",
+]
+graph = [
+    "networkx>=3.0",
+]
+all = [
+    "hybriddb[analytics,graph]",
+]
 sentence-transformers = [
     "sentence-transformers>=3.0.0",
 ]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "duckdb>=1.0.0",
+    "networkx>=3.0",
 ]
 
 [build-system]
@@ -44,3 +55,7 @@ packages = ["hybriddb"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "graph: tests for graph features (requires networkx)",
+    "analytics: tests for DuckDB analytics (requires duckdb)",
+]

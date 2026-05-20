@@ -125,6 +125,18 @@ class TestCreateTable:
         db.create_table("dup", {"name": "TEXT"})
         assert "dup" in db.list_tables()
 
+    def test_rejects_fts_in_name(self, db):
+        with pytest.raises(ValueError, match="_fts_"):
+            db.create_table("my_fts_table", {"name": "TEXT"})
+
+    def test_column_migration(self, db):
+        db.create_table("mig", {"name": "TEXT"})
+        db.create_table("mig", {"name": "TEXT", "notes": "LONGTEXT"})
+        schema = db.get_schema("mig")
+        assert "name" in schema
+        assert "notes" in schema
+        assert schema["notes"] == "LONGTEXT"
+
 
 class TestCRUD:
     def test_insert_and_get(self, db_with_contacts):
@@ -146,6 +158,13 @@ class TestCRUD:
         assert row["clv"] == 5000.0
         assert row["is_active"] == 1
 
+    def test_insert_with_string_pk(self, db):
+        db.create_table("customers", {"id": "TEXT PRIMARY KEY", "name": "LONGTEXT"})
+        row_id = db.insert("customers", {"id": "cust_1", "name": "Alice"})
+        assert row_id == "cust_1"
+        row = db.get("customers", "cust_1")
+        assert row["name"] == "Alice"
+
     def test_insert_batch(self, db_with_contacts):
         ids = db_with_contacts.insert_batch(
             "contacts",
@@ -161,11 +180,7 @@ class TestCRUD:
     def test_update(self, db_with_contacts):
         row_id = db_with_contacts.insert(
             "contacts",
-            {
-                "first_name": "Alice",
-                "company": "Acme",
-                "clv": 1000.0,
-            },
+            {"first_name": "Alice", "company": "Acme", "clv": 1000.0},
         )
         ok = db_with_contacts.update("contacts", row_id, {"clv": 2000.0, "first_name": "Alice2"})
         assert ok
@@ -178,7 +193,7 @@ class TestCRUD:
         assert not ok
 
     def test_delete(self, db_with_contacts):
-        row_id = db_with_contacts.insert("contacts", {"first_name": "ToDelete", "company": " Gone"})
+        row_id = db_with_contacts.insert("contacts", {"first_name": "ToDelete", "company": "Gone"})
         ok = db_with_contacts.delete("contacts", row_id)
         assert ok
         assert db_with_contacts.get("contacts", row_id) is None
@@ -206,15 +221,41 @@ class TestCRUD:
         assert db_with_contacts.count("contacts") == 3
         assert db_with_contacts.count("contacts", where="clv > 150.0") == 2
 
+    def test_raw_query(self, db_with_contacts):
+        db_with_contacts.insert("contacts", {"first_name": "Alice"})
+        results = db_with_contacts.raw_query("SELECT first_name FROM contacts")
+        assert len(results) == 1
+        assert results[0]["first_name"] == "Alice"
+
+    def test_vector_upsert(self, db_with_contacts):
+        row_id = db_with_contacts.insert("contacts", {"first_name": "Alice", "notes": "hello"})
+        ok = db_with_contacts.vector_upsert(
+            "contacts_notes", row_id, "updated text",
+            _mock_embedding("updated text"),
+            {"first_name": "Alice"},
+        )
+        assert ok
+
+    def test_row_to_metadata(self, db_with_contacts):
+        row_id = db_with_contacts.insert("contacts", {"first_name": "Alice", "clv": 100.0})
+        row = db_with_contacts.get("contacts", row_id)
+        meta = db_with_contacts.row_to_metadata("contacts", row)
+        assert "first_name" in meta
+        assert meta["first_name"] == "Alice"
+        assert "clv" in meta
+
+    def test_insert_with_skip_journal(self, db):
+        db.create_table("test", {"name": "TEXT", "bio": "LONGTEXT", "summary": "LONGTEXT"})
+        row_id = db.insert("test", {"name": "alice", "bio": "engineer", "summary": "hello"},
+                           skip_journal_columns={"summary"})
+        assert row_id > 0
+
 
 class TestInsertSync:
     def test_sync_false_defers_chroma(self, db_with_contacts):
         row_id = db_with_contacts.insert(
             "contacts",
-            {
-                "first_name": "Alice",
-                "notes": "Important notes here",
-            },
+            {"first_name": "Alice", "notes": "Important notes here"},
             sync=False,
         )
         assert db_with_contacts._journal_count("contacts") > 0
@@ -301,10 +342,7 @@ class TestSearch:
     def test_search_all(self, db_with_contacts):
         db_with_contacts.insert(
             "contacts",
-            {
-                "company": "Acme Corp builds rockets",
-                "notes": "key decision maker for space projects",
-            },
+            {"company": "Acme Corp builds rockets", "notes": "key decision maker for space projects"},
         )
         results = db_with_contacts.search_all("contacts", "rockets")
         assert isinstance(results, list)
@@ -312,21 +350,13 @@ class TestSearch:
     def test_search_with_recency(self, db):
         db.create_table(
             "messages",
-            {
-                "role": "TEXT",
-                "content": "LONGTEXT",
-                "ts": "TEXT",
-            },
+            {"role": "TEXT", "content": "LONGTEXT", "ts": "TEXT"},
         )
         old_ts = (datetime.now(UTC) - timedelta(days=90)).isoformat()
         new_ts = datetime.now(UTC).isoformat()
-
         db.insert("messages", {"role": "user", "content": "old message about python", "ts": old_ts})
         db.insert("messages", {"role": "user", "content": "new message about python", "ts": new_ts})
-
-        results = db.search(
-            "messages", "content", "python", recency_weight=0.3, recency_column="ts"
-        )
+        results = db.search("messages", "content", "python", recency_weight=0.3, recency_column="ts")
         assert len(results) >= 2
         for r in results:
             assert "_score" in r
@@ -338,6 +368,14 @@ class TestSearch:
     def test_search_nonexistent_table(self, db):
         results = db.search("nonexistent", "col", "query")
         assert results == []
+
+    def test_search_with_query_embedding(self, db_with_contacts):
+        db_with_contacts.insert("contacts", {"notes": "python programming"})
+        emb = _mock_embedding("python")
+        results = db_with_contacts.search(
+            "contacts", "notes", "python", query_embedding=emb
+        )
+        assert isinstance(results, list)
 
 
 class TestJournal:
@@ -383,15 +421,22 @@ class TestHealthAndReconcile:
         assert "metadata_updated" in result
 
 
+class TestChromaHealth:
+    def test_force_rebuild_unavailable(self, tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding, max_chroma_index_gb=0)
+        result = db.force_rebuild_chroma_index()
+        assert result["status"] == "unavailable"
+
+    def test_index_health_no_vector_dir(self, tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        db._check_index_health()
+        # Should not raise
+
+
 class TestMetadataStrategy:
     def test_text_in_metadata(self, db_with_contacts):
         row_id = db_with_contacts.insert(
-            "contacts",
-            {
-                "first_name": "Alice",
-                "company": "Acme",
-                "notes": "VIP",
-            },
+            "contacts", {"first_name": "Alice", "company": "Acme", "notes": "VIP"},
         )
         row = db_with_contacts.get("contacts", row_id)
         meta = db_with_contacts._row_to_metadata("contacts", row)
@@ -400,12 +445,7 @@ class TestMetadataStrategy:
 
     def test_longtext_not_in_metadata(self, db_with_contacts):
         row_id = db_with_contacts.insert(
-            "contacts",
-            {
-                "first_name": "Alice",
-                "company": "Acme",
-                "notes": "VIP",
-            },
+            "contacts", {"first_name": "Alice", "company": "Acme", "notes": "VIP"},
         )
         row = db_with_contacts.get("contacts", row_id)
         meta = db_with_contacts._row_to_metadata("contacts", row)
@@ -426,13 +466,7 @@ class TestMetadataStrategy:
         assert "clv" not in meta
 
     def test_boolean_in_metadata(self, db_with_contacts):
-        row_id = db_with_contacts.insert(
-            "contacts",
-            {
-                "first_name": "Alice",
-                "is_active": True,
-            },
-        )
+        row_id = db_with_contacts.insert("contacts", {"first_name": "Alice", "is_active": True})
         row = db_with_contacts.get("contacts", row_id)
         meta = db_with_contacts._row_to_metadata("contacts", row)
         assert "is_active" in meta
@@ -443,28 +477,14 @@ class TestConversationSchema:
     def test_messages_table(self, db):
         db.create_table(
             "messages",
-            {
-                "ts": "TEXT NOT NULL",
-                "role": "TEXT NOT NULL",
-                "content": "LONGTEXT",
-                "metadata": "JSON",
-            },
+            {"ts": "TEXT NOT NULL", "role": "TEXT NOT NULL", "content": "LONGTEXT", "metadata": "JSON"},
         )
         schema = db.get_schema("messages")
         assert schema["content"] == "LONGTEXT"
         assert schema["metadata"] == "JSON"
-
-        row_id = db.insert(
-            "messages",
-            {
-                "ts": "2026-01-01T00:00:00Z",
-                "role": "user",
-                "content": "Hello world",
-            },
-        )
+        row_id = db.insert("messages", {"ts": "2026-01-01T00:00:00Z", "role": "user", "content": "Hello world"})
         row = db.get("messages", row_id)
         assert row["role"] == "user"
-
         results = db.search("messages", "content", "Hello", mode=SearchMode.KEYWORD)
         assert len(results) >= 1
 
@@ -487,16 +507,11 @@ class TestMemorySchema:
         assert schema["trigger"] == "LONGTEXT"
         assert schema["action"] == "LONGTEXT"
         assert schema["linked_to"] == "JSON"
-
         row_id = db.insert(
             "memories",
             {
-                "id": "abc123",
-                "trigger": "user likes python",
-                "action": "suggest python tools",
-                "confidence": 0.8,
-                "domain": "preferences",
-                "structured_data": "{}",
+                "id": "abc123", "trigger": "user likes python", "action": "suggest python tools",
+                "confidence": 0.8, "domain": "preferences", "structured_data": "{}",
             },
         )
         row = db.get("memories", row_id)
@@ -505,22 +520,9 @@ class TestMemorySchema:
     def test_insights_table(self, db):
         db.create_table(
             "insights",
-            {
-                "id": "TEXT PRIMARY KEY",
-                "summary": "LONGTEXT",
-                "domain": "TEXT",
-                "confidence": "REAL",
-            },
+            {"id": "TEXT PRIMARY KEY", "summary": "LONGTEXT", "domain": "TEXT", "confidence": "REAL"},
         )
-        row_id = db.insert(
-            "insights",
-            {
-                "id": "i1",
-                "summary": "User prefers morning meetings",
-                "domain": "preferences",
-                "confidence": 0.5,
-            },
-        )
+        row_id = db.insert("insights", {"id": "i1", "summary": "User prefers morning meetings", "domain": "preferences", "confidence": 0.5})
         results = db.search("insights", "summary", "morning meetings")
         assert len(results) >= 1
 
@@ -533,3 +535,256 @@ class TestAutoIncrement:
         id3 = db_with_contacts.insert("contacts", {"first_name": "C"})
         assert id3 > id1
         assert id3 > id2
+
+
+class TestGraphNodes:
+    def test_add_and_get_node(self, db):
+        nid = db.add_node("n1", label="Alice", type="person", domain="users")
+        assert nid == "n1"
+        node = db.get_node("n1")
+        assert node["label"] == "Alice"
+        assert node["type"] == "person"
+        assert node["domain"] == "users"
+
+    def test_add_nodes_batch(self, db):
+        ids = db.add_nodes([
+            {"id": "n1", "label": "Alice", "domain": "users"},
+            {"id": "n2", "label": "Bob", "domain": "users"},
+        ])
+        assert ids == ["n1", "n2"]
+
+    def test_update_node(self, db):
+        db.add_node("n1", label="Alice")
+        ok = db.update_node("n1", {"label": "Alice Smith", "confidence": 0.9})
+        assert ok
+        node = db.get_node("n1")
+        assert node["label"] == "Alice Smith"
+        assert node["confidence"] == 0.9
+
+    def test_update_nonexistent_node(self, db):
+        ok = db.update_node("nonexistent", {"label": "Nope"})
+        assert not ok
+
+    def test_delete_node(self, db):
+        db.add_node("n1", label="ToDelete")
+        ok = db.delete_node("n1")
+        assert ok
+        assert db.get_node("n1") is None
+
+    def test_delete_nonexistent_node(self, db):
+        assert not db.delete_node("nonexistent")
+
+    def test_list_nodes(self, db):
+        db.add_node("n1", type="person", domain="users")
+        db.add_node("n2", type="company", domain="biz")
+        nodes = db.list_nodes(type="person")
+        assert len(nodes) == 1
+        assert nodes[0]["id"] == "n1"
+
+    def test_list_nodes_with_properties(self, db):
+        db.add_node("n1", type="person", properties={"age": 30, "city": "SF"})
+        node = db.get_node("n1")
+        assert node["properties"]["age"] == 30
+
+
+class TestGraphEdges:
+    def test_add_and_get_edge(self, db):
+        db.add_node("n1", label="Alice")
+        db.add_node("n2", label="Bob")
+        eid = db.add_edge(None, "n1", "n2", type="knows", weight=0.8)
+        assert eid is not None
+        edge = db.get_edge(eid)
+        assert edge["source_id"] == "n1"
+        assert edge["target_id"] == "n2"
+        assert edge["type"] == "knows"
+
+    def test_add_edges_batch(self, db):
+        db.add_node("n1"), db.add_node("n2"), db.add_node("n3")
+        ids = db.add_edges([
+            {"source_id": "n1", "target_id": "n2", "type": "knows"},
+            {"source_id": "n1", "target_id": "n3", "type": "knows"},
+        ])
+        assert len(ids) == 2
+
+    def test_update_edge(self, db):
+        db.add_node("n1"), db.add_node("n2")
+        eid = db.add_edge(None, "n1", "n2", weight=0.5)
+        ok = db.update_edge(eid, {"weight": 0.9})
+        assert ok
+        edge = db.get_edge(eid)
+        assert edge["weight"] == 0.9
+
+    def test_delete_edge(self, db):
+        db.add_node("n1"), db.add_node("n2")
+        eid = db.add_edge(None, "n1", "n2")
+        ok = db.delete_edge(eid)
+        assert ok
+        assert db.get_edge(eid) is None
+
+    def test_get_edges_filtered(self, db):
+        db.add_node("n1"), db.add_node("n2"), db.add_node("n3")
+        db.add_edge(None, "n1", "n2", type="knows")
+        db.add_edge(None, "n1", "n3", type="reports_to")
+        edges = db.get_edges(source_id="n1")
+        assert len(edges) == 2
+        edges = db.get_edges(source_id="n1", type="knows")
+        assert len(edges) == 1
+
+    def test_neighbors(self, db):
+        db.add_node("n1"), db.add_node("n2"), db.add_node("n3")
+        db.add_edge(None, "n1", "n2", type="knows")
+        db.add_edge(None, "n1", "n3", type="knows")
+        neigh = db.neighbors("n1")
+        assert len(neigh) == 2
+        nids = {n["node"]["id"] for n in neigh}
+        assert "n2" in nids
+        assert "n3" in nids
+
+    def test_traverse(self, db):
+        nodes = ["a", "b", "c", "d"]
+        for n in nodes:
+            db.add_node(n)
+        db.add_edge(None, "a", "b", weight=0.9)
+        db.add_edge(None, "b", "c", weight=0.8)
+        db.add_edge(None, "c", "d", weight=0.7)
+        path = db.traverse("a", max_depth=3, direction="out")
+        assert len(path) >= 3
+
+    def test_decay_edges(self, db):
+        db.add_node("n1"), db.add_node("n2")
+        past = (datetime.now(UTC) - timedelta(days=400)).isoformat()
+        eid = db.add_edge(None, "n1", "n2", valid_until=past, weight=0.1)
+        dec = db.decay_edges()
+        assert dec == 1
+        # weight 0.1 - 0.15 = -0.05, clamped to 0.05 by max(), 0.05 <= 0.05 → delete
+        assert db.get_edge(eid) is None
+
+    def test_register_entity_node(self, db):
+        db.create_table("users", {"id": "TEXT PRIMARY KEY", "name": "LONGTEXT"})
+        ok = db.register_entity_node("users", type="user", id_column="id")
+        assert ok
+
+    def test_register_edge_rule(self, db):
+        ok = db.register_edge_rule("orders", "customers", target_match="customer_id", edge_type="belongs_to")
+        assert ok
+
+    def test_register_edge_rule_invalid(self, db):
+        with pytest.raises(ValueError, match="must be provided together"):
+            db.register_edge_rule("a", "b", source_column="x")
+
+    def test_register_edge_rule_no_match(self, db):
+        with pytest.raises(ValueError, match="required"):
+            db.register_edge_rule("a", "b")
+
+
+class TestGraphAlgorithms:
+    def test_to_networkx(self, db):
+        db.add_node("n1"), db.add_node("n2")
+        db.add_edge(None, "n1", "n2", weight=0.8)
+        g = db.to_networkx()
+        assert g.has_node("n1")
+        assert g.has_node("n2")
+        assert g.has_edge("n1", "n2")
+        assert g.edges["n1", "n2"]["weight"] == 0.8
+
+    def test_to_networkx_cache(self, db):
+        db.add_node("n1"), db.add_node("n2")
+        db.add_edge(None, "n1", "n2")
+        g1 = db.to_networkx()
+        g2 = db.to_networkx()
+        assert g1 is g2  # cached
+
+    def test_to_networkx_invalidates(self, db):
+        db.add_node("n1"), db.add_node("n2")
+        db.add_edge(None, "n1", "n2")
+        g1 = db.to_networkx()
+        db.add_node("n3")
+        g2 = db.to_networkx()
+        assert g1 is not g2  # invalidated
+
+    def test_pagerank(self, db):
+        db.add_node("n1"), db.add_node("n2"), db.add_node("n3")
+        db.add_edge(None, "n1", "n2", weight=0.9)
+        db.add_edge(None, "n1", "n3", weight=0.8)
+        pr = db.pagerank()
+        assert "n1" in pr
+
+    def test_shortest_path(self, db):
+        db.add_node("a"), db.add_node("b"), db.add_node("c")
+        db.add_edge(None, "a", "b", weight=0.9)
+        db.add_edge(None, "b", "c", weight=0.8)
+        path = db.shortest_path("a", "c")
+        assert path == ["a", "b", "c"]
+
+    def test_connected_components(self, db):
+        db.add_node("a"), db.add_node("b")
+        db.add_edge(None, "a", "b")
+        db.add_node("c")
+        comps = db.connected_components()
+        assert len(comps) <= 2
+
+    def test_community_detect(self, db):
+        for n in ["a", "b", "c"]:
+            db.add_node(n)
+        db.add_edge(None, "a", "b", weight=1.0)
+        db.add_edge(None, "b", "c", weight=1.0)
+        comms = db.community_detect()
+        assert isinstance(comms, list)
+
+    def test_search_graph(self, db):
+        db.create_table("items", {"id": "TEXT PRIMARY KEY", "name": "LONGTEXT"})
+        db.register_entity_node("items", type="item", id_column="id")
+        db.insert("items", {"id": "item_1", "name": "gadget"})
+        results = db.search_graph("gadget")
+        assert isinstance(results, list)
+
+
+class TestDuckDBAnalytics:
+    def test_analytics(self, db):
+        db.create_table("analytics_test", {"val": "INTEGER"})
+        db.insert("analytics_test", {"val": 42})
+        db.register_duckdb_table("analytics_test")
+        result = db.analytics("SELECT val + 1 AS result FROM analytics_test")
+        assert result == [{"result": 43}]
+
+    def test_register_duckdb_table(self, db):
+        db.create_table("analytics_test", {"val": "INTEGER", "name": "LONGTEXT"})
+        db.insert("analytics_test", {"val": 42, "name": "test"})
+        ok = db.register_duckdb_table("analytics_test")
+        assert ok
+        result = db.analytics("SELECT COUNT(*) AS cnt FROM analytics_test")
+        assert result[0]["cnt"] >= 1
+
+    def test_unregister_duckdb_table(self, db):
+        db.create_table("analytics_test", {"val": "INTEGER"})
+        db.register_duckdb_table("analytics_test")
+        ok = db.unregister_duckdb_table("analytics_test")
+        assert ok
+        assert not db.unregister_duckdb_table("analytics_test")
+
+
+class TestEmbeddingModelError:
+    def test_model_mismatch(self, tmp_dir):
+        db1 = HybridDB(tmp_dir, embedding_fn=_mock_embedding, embedding_model_name="model_a")
+        db1.create_table("test", {"name": "LONGTEXT"})
+        db1.close()
+        with pytest.raises(EmbeddingModelError, match="model mismatch"):
+            HybridDB(tmp_dir, embedding_fn=_mock_embedding, embedding_model_name="model_b")
+
+    def test_force_override(self, tmp_dir):
+        db1 = HybridDB(tmp_dir, embedding_fn=_mock_embedding, embedding_model_name="model_a")
+        db1.create_table("test", {"name": "LONGTEXT"})
+        db1.close()
+        db2 = HybridDB(tmp_dir, embedding_fn=_mock_embedding, embedding_model_name="model_b", force_model=True)
+        assert db2 is not None
+        db2.close()
+
+
+class TestDisableChroma:
+    def test_init_with_zero_max_chroma(self, tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding, max_chroma_index_gb=0)
+        assert db._chroma is None
+        db.create_table("test", {"name": "TEXT"})
+        db.insert("test", {"name": "hello"})
+        results = db.search("test", "name", "hello", mode=SearchMode.KEYWORD)
+        assert len(results) >= 1
