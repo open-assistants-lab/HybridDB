@@ -6,3 +6,6 @@ dist/
 .pytest_cache/
 *.db
 vectors/
+
+# Benchmark results
+results/
