@@ -65,9 +65,37 @@ class EmbeddingModelError(Exception):
     pass
 
 
+_default_ef: Any | None = None
+_default_ef_lock = threading.Lock()
+
+
+def _get_default_ef():
+    global _default_ef
+    if _default_ef is not None:
+        return _default_ef
+    with _default_ef_lock:
+        if _default_ef is not None:
+            return _default_ef
+        try:
+            from chromadb.utils import embedding_functions
+
+            _default_ef = embedding_functions.DefaultEmbeddingFunction()
+        except Exception:
+            _default_ef = None
+    return _default_ef
+
+
 def _default_embedding_fn(text: str) -> list[float]:
     if not text:
         return [0.0] * EMBEDDING_DIM
+    ef = _get_default_ef()
+    if ef is not None:
+        try:
+            result = ef([text])
+            if result and len(result) > 0:
+                return result[0]
+        except Exception:
+            pass
     return _hash_embedding(text)
 
 
