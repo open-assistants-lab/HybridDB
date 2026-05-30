@@ -33,16 +33,15 @@ def test_add_edges_batch(benchmark, graph_db, scale):
     benchmark(_add)
 
 
+def _load_graph(graph_db, n_nodes: int, n_edges: int):
+    nodes, edges = generate_graph_data(n_nodes, n_edges)
+    graph_db.add_nodes(nodes)
+    graph_db.add_edges(edges)
+    return nodes, edges
+
+
 def test_get_neighbors(benchmark, graph_db, scale):
-    nodes, edges = generate_graph_data(scale.n_graph_nodes, scale.n_graph_edges)
-    graph_db.insert_batch("nodes", nodes, sync=False)
-    for e in edges:
-        graph_db.register_entity_node("nodes", e["source_id"])
-        graph_db.register_entity_node("nodes", e["target_id"])
-        graph_db.add_edge(
-            e["id"], e["source_id"], e["target_id"],
-            edge_type=e["type"], weight=e["weight"],
-        )
+    nodes, _ = _load_graph(graph_db, scale.n_graph_nodes, scale.n_graph_edges)
 
     target = nodes[len(nodes) // 2]["id"]
 
@@ -53,15 +52,7 @@ def test_get_neighbors(benchmark, graph_db, scale):
 
 
 def test_shortest_path(benchmark, graph_db, scale):
-    nodes, edges = generate_graph_data(scale.n_graph_nodes, scale.n_graph_edges)
-    graph_db.insert_batch("nodes", nodes, sync=False)
-    for e in edges:
-        graph_db.register_entity_node("nodes", e["source_id"])
-        graph_db.register_entity_node("nodes", e["target_id"])
-        graph_db.add_edge(
-            e["id"], e["source_id"], e["target_id"],
-            edge_type=e["type"], weight=e["weight"],
-        )
+    nodes, _ = _load_graph(graph_db, scale.n_graph_nodes, scale.n_graph_edges)
 
     src = nodes[0]["id"]
     dst = nodes[-1]["id"]
@@ -73,15 +64,7 @@ def test_shortest_path(benchmark, graph_db, scale):
 
 
 def test_pagerank(benchmark, graph_db, scale):
-    nodes, edges = generate_graph_data(scale.n_graph_nodes, scale.n_graph_edges)
-    graph_db.insert_batch("nodes", nodes, sync=False)
-    for e in edges:
-        graph_db.register_entity_node("nodes", e["source_id"])
-        graph_db.register_entity_node("nodes", e["target_id"])
-        graph_db.add_edge(
-            e["id"], e["source_id"], e["target_id"],
-            edge_type=e["type"], weight=e["weight"],
-        )
+    _load_graph(graph_db, scale.n_graph_nodes, scale.n_graph_edges)
 
     def _pr():
         return graph_db.pagerank()
@@ -90,15 +73,7 @@ def test_pagerank(benchmark, graph_db, scale):
 
 
 def test_decay_edges(benchmark, graph_db, scale):
-    nodes, edges = generate_graph_data(100, 500)
-    graph_db.insert_batch("nodes", nodes, sync=False)
-    for e in edges:
-        graph_db.register_entity_node("nodes", e["source_id"])
-        graph_db.register_entity_node("nodes", e["target_id"])
-        graph_db.add_edge(
-            e["id"], e["source_id"], e["target_id"],
-            edge_type=e["type"], weight=e["weight"],
-        )
+    _load_graph(graph_db, 100, 500)
 
     def _decay():
         return graph_db.decay_edges()

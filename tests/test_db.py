@@ -1,15 +1,14 @@
 """Tests for HybridDB: SQLite + FTS5 + ChromaDB with self-healing journal."""
 
+import asyncio
 import hashlib
-import json
 import shutil
 import tempfile
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
-from hybriddb import EmbeddingModelError, HybridDB, SearchMode
+from hybriddb import HYBRID, KEYWORD, LONGTEXT, TEXT, Column, EmbeddingModelError, HybridDB, SearchMode
 from hybriddb.db import _sanitize_fts_query
 
 EMBEDDING_DIM = 384
@@ -129,6 +128,17 @@ class TestCreateTable:
         with pytest.raises(ValueError, match="_fts_"):
             db.create_table("my_fts_table", {"name": "TEXT"})
 
+    def test_rejects_invalid_identifier_names(self, db):
+        with pytest.raises(ValueError, match="Invalid identifier"):
+            db.create_table("bad-name", {"name": "TEXT"})
+        with pytest.raises(ValueError, match="Invalid identifier"):
+            db.create_table("items", {"bad-name": "TEXT"})
+
+    def test_accepts_typed_columns_and_constants(self, db):
+        db.create_table("typed_docs", {"title": Column(TEXT), "body": LONGTEXT})
+        schema = db.get_schema("typed_docs")
+        assert schema == {"title": "TEXT", "body": "LONGTEXT"}
+
     def test_column_migration(self, db):
         db.create_table("mig", {"name": "TEXT"})
         db.create_table("mig", {"name": "TEXT", "notes": "LONGTEXT"})
@@ -227,6 +237,18 @@ class TestCRUD:
         assert len(results) == 1
         assert results[0]["first_name"] == "Alice"
 
+    def test_read_query_rejects_writes(self, db_with_contacts):
+        db_with_contacts.insert("contacts", {"first_name": "Alice"})
+        assert db_with_contacts.read_query("SELECT first_name FROM contacts")
+        with pytest.raises(ValueError, match="read-only"):
+            db_with_contacts.read_query("DELETE FROM contacts")
+
+    def test_public_cursor_context_manager(self, db_with_contacts):
+        db_with_contacts.insert("contacts", {"first_name": "Alice"})
+        with db_with_contacts.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM contacts")
+            assert cur.fetchone()[0] == 1
+
     def test_vector_upsert(self, db_with_contacts):
         row_id = db_with_contacts.insert("contacts", {"first_name": "Alice", "notes": "hello"})
         ok = db_with_contacts.vector_upsert(
@@ -253,7 +275,7 @@ class TestCRUD:
 
 class TestInsertSync:
     def test_sync_false_defers_chroma(self, db_with_contacts):
-        row_id = db_with_contacts.insert(
+        db_with_contacts.insert(
             "contacts",
             {"first_name": "Alice", "notes": "Important notes here"},
             sync=False,
@@ -308,6 +330,25 @@ class TestSearch:
         assert len(results) >= 1
         found = any(r["company"] == "Acme Corp" for r in results)
         assert found
+
+    def test_search_accepts_string_mode_and_exported_constants(self, db_with_contacts):
+        db_with_contacts.insert("contacts", {"company": "Acme Corp", "notes": "rocket launch"})
+        assert db_with_contacts.search("contacts", "company", "Acme", mode="keyword")
+        assert db_with_contacts.search("contacts", "company", "Acme", mode=KEYWORD)
+        assert db_with_contacts.search("contacts", "notes", "rocket", mode=HYBRID)
+
+    def test_search_without_column_searches_all_text_columns(self, db_with_contacts):
+        db_with_contacts.insert(
+            "contacts",
+            {"company": "Acme Corp builds rockets", "notes": "space launch partner"},
+        )
+        results = db_with_contacts.search("contacts", "rockets", limit=5)
+        assert results
+        assert results[0]["company"] == "Acme Corp builds rockets"
+
+    def test_search_columns_alias(self, db_with_contacts):
+        db_with_contacts.insert("contacts", {"notes": "important aerospace project"})
+        assert db_with_contacts.search_columns("contacts", "aerospace")
 
     def test_semantic_search(self, db_with_contacts):
         db_with_contacts.insert("contacts", {"notes": "key decision maker for enterprise deals"})
@@ -368,6 +409,59 @@ class TestSearch:
     def test_search_nonexistent_table(self, db):
         results = db.search("nonexistent", "col", "query")
         assert results == []
+
+    def test_search_rejects_invalid_identifier(self, db):
+        with pytest.raises(ValueError, match="Invalid identifier"):
+            db.search("bad-name", "content", "query")
+        with pytest.raises(ValueError, match="Invalid identifier"):
+            db.search("messages", "bad-name", "query")
+
+
+class TestAsyncApi:
+    @pytest.mark.asyncio
+    async def test_async_crud_and_search(self, tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        await db.acreate_table("messages", {"content": LONGTEXT, "role": TEXT})
+        row_id = await db.ainsert("messages", {"content": "async python notes", "role": "user"})
+        row = await db.aget("messages", row_id)
+        assert row["content"] == "async python notes"
+
+        results = await db.asearch("messages", "content", "python", mode="hybrid")
+        assert results
+        assert await db.acount("messages") == 1
+        assert await db.aread_query("SELECT role FROM messages") == [{"role": "user"}]
+
+    @pytest.mark.asyncio
+    async def test_async_concurrent_inserts_are_serialized_safely(self, tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        await db.acreate_table("events", {"content": LONGTEXT})
+
+        async def insert_one(i: int) -> int | str:
+            return await db.ainsert("events", {"content": f"event {i}"})
+
+        ids = await asyncio.gather(*(insert_one(i) for i in range(10)))
+        assert len(set(ids)) == 10
+        assert await db.acount("events") == 10
+
+
+class TestFacades:
+    def test_graph_facade_delegates_to_graph_methods(self, db):
+        node_id = db.graph.add_node("Alice", type="person")
+        assert db.graph.get_node(node_id)["label"] == "Alice"
+
+    def test_graph_edge_type_and_get_neighbors_aliases(self, db):
+        db.add_node("a", label="A")
+        db.add_node("b", label="B")
+        db.add_edge("e1", "a", "b", edge_type="knows")
+        neighbors = db.get_neighbors("a")
+        assert neighbors[0]["node"]["id"] == "b"
+        assert neighbors[0]["edge"]["type"] == "knows"
+
+    def test_olap_facade_delegates_to_analytics(self, db):
+        db.create_table("metrics", {"value": "INTEGER"})
+        db.insert_batch("metrics", [{"value": 1}, {"value": 2}], sync=False)
+        rows = db.olap.query("SELECT SUM(value) AS total FROM metrics")
+        assert rows[0]["total"] == 3
 
     def test_search_with_query_embedding(self, db_with_contacts):
         db_with_contacts.insert("contacts", {"notes": "python programming"})
@@ -522,7 +616,7 @@ class TestMemorySchema:
             "insights",
             {"id": "TEXT PRIMARY KEY", "summary": "LONGTEXT", "domain": "TEXT", "confidence": "REAL"},
         )
-        row_id = db.insert("insights", {"id": "i1", "summary": "User prefers morning meetings", "domain": "preferences", "confidence": 0.5})
+        db.insert("insights", {"id": "i1", "summary": "User prefers morning meetings", "domain": "preferences", "confidence": 0.5})
         results = db.search("insights", "summary", "morning meetings")
         assert len(results) >= 1
 

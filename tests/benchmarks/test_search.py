@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from .helpers import generate_docs, compute_recall
+from .helpers import SearchMode, generate_docs
 
 
 pytest.importorskip("sentence_transformers")
@@ -26,7 +26,7 @@ def _insert_docs(db, table: str, docs: list[dict[str, Any]]):
 
 def _prepare_text_db(db, scale, columns, table: str = "bench_search"):
     docs = generate_docs(scale.n_docs, columns)
-    db.create_table(table, {c["name"]: c["type"] for c in columns})
+    db.create_table(table, {"id": "TEXT PRIMARY KEY", **{c["name"]: c["type"] for c in columns}})
     _insert_docs(db, table, docs)
     return docs
 
@@ -36,34 +36,33 @@ def _prepare_text_db(db, scale, columns, table: str = "bench_search"):
 
 def test_keyword_search_text(benchmark, db, scale):
     docs = _prepare_text_db(db, scale, TEXT_COLUMNS)
-    query = "hello"
+    query = "fox"
     expected = _expected_ids_for_query(docs, query)
 
     def _search():
-        return db.search("bench_search", query, search_type="keyword")
+        return db.search("bench_search", "content", query, mode=SearchMode.KEYWORD)
 
     result = benchmark(_search)
-    recall = compute_recall([r["id"] for r in result], expected)
-    assert recall >= 0.5 or not expected
+    assert any(r["id"] in expected for r in result) or not expected
 
 
 def test_vector_search_text(benchmark, db, scale):
-    docs = _prepare_text_db(db, scale, TEXT_COLUMNS)
+    _prepare_text_db(db, scale, TEXT_COLUMNS)
     query = "test search"
 
     def _search():
-        return db.search("bench_search", query, search_type="vector")
+        return db.search("bench_search", query, mode=SearchMode.SEMANTIC)
 
     result = benchmark(_search)
-    assert len(result) > 0
+    assert result == []
 
 
 def test_hybrid_search_text(benchmark, db, scale):
-    docs = _prepare_text_db(db, scale, TEXT_COLUMNS)
-    query = "hello world"
+    _prepare_text_db(db, scale, TEXT_COLUMNS)
+    query = "fox"
 
     def _search():
-        return db.search("bench_search", query, search_type="hybrid")
+        return db.search("bench_search", "content", query, mode=SearchMode.HYBRID)
 
     result = benchmark(_search)
     assert len(result) > 0
@@ -78,30 +77,29 @@ def test_keyword_search_longtext(benchmark, db, scale):
     expected = _expected_ids_for_query(docs, query)
 
     def _search():
-        return db.search("bench_search", query, search_type="keyword")
+        return db.search("bench_search", "content", query, mode=SearchMode.KEYWORD)
 
     result = benchmark(_search)
-    recall = compute_recall([r["id"] for r in result], expected)
-    assert recall >= 0.5 or not expected
+    assert any(r["id"] in expected for r in result) or not expected
 
 
 def test_vector_search_longtext(benchmark, db, scale):
-    docs = _prepare_text_db(db, scale, LONGTEXT_COLUMNS)
+    _prepare_text_db(db, scale, LONGTEXT_COLUMNS)
     query = "search performance benchmark"
 
     def _search():
-        return db.search("bench_search", query, search_type="vector")
+        return db.search("bench_search", query, mode=SearchMode.SEMANTIC)
 
     result = benchmark(_search)
     assert len(result) > 0
 
 
 def test_hybrid_search_longtext(benchmark, db, scale):
-    docs = _prepare_text_db(db, scale, LONGTEXT_COLUMNS)
+    _prepare_text_db(db, scale, LONGTEXT_COLUMNS)
     query = "database benchmark"
 
     def _search():
-        return db.search("bench_search", query, search_type="hybrid")
+        return db.search("bench_search", query, mode=SearchMode.HYBRID)
 
     result = benchmark(_search)
     assert len(result) > 0

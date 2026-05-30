@@ -3,12 +3,12 @@
 import os
 from pathlib import Path
 
-import pytest
-
 from .helpers import generate_docs
 
 
 def _dir_size(path: str) -> int:
+    if os.path.isfile(path):
+        return os.path.getsize(path)
     total = 0
     for dirpath, dirnames, filenames in os.walk(path):
         for f in filenames:

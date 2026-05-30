@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+import sqlite3
+import struct
+import tempfile
+import uuid
+from collections import defaultdict
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from hybriddb.embedding import EMBEDDING_DIM
+from hybriddb.types import Column, SearchMode
+from hybriddb.utils import (
+    CHROMA_BATCH,
+    JOURNAL_CAP,
+    RRF_K,
+    _CHROMA_INDEX_MAX_ELEMENTS,
+    _CHROMA_INDEX_MAX_M0,
+    _CHROMA_INDEX_WARN_FACTOR,
+    _CHROMA_REBUILD_BATCH,
+    _SKIP_SEARCH_COLUMNS,
+    _SYSTEM_TABLES,
+    _coerce_search_mode,
+    _column_spec,
+    _is_safe_identifier,
+    _now_iso,
+    _sanitize_fts_query,
+    _validate_identifier,
+    _validate_order_by,
+)
+
+logger = logging.getLogger("hybriddb")
+
+class SchemaMixin:
+    def _table_meta(self, table: str) -> dict[str, Any] | None:
+        with self._connect() as cur:
+            cur.execute("SELECT * FROM _schema WHERE table_name = ?", (table,))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "table_name": row["table_name"],
+            "columns": json.loads(row["columns_json"]),
+            "version": row["version"],
+            "is_dirty": bool(row["is_dirty"]),
+        }
+
+    def _save_table_meta(
+        self, cur: sqlite3.Cursor, table: str, columns: dict[str, str], dirty: bool = False
+    ) -> None:
+        now = _now_iso()
+        cur.execute(
+            "INSERT OR REPLACE INTO _schema "
+            "(table_name, columns_json, version, is_dirty, "
+            "embedding_model, embedding_dim, created_at, updated_at) "
+            "VALUES (?, ?, "
+            "COALESCE((SELECT version FROM _schema WHERE table_name = ?), 0) + 1, "
+            "?, ?, ?, ?, ?)",
+            (table, json.dumps(columns), table, int(dirty),
+             self._embedding_model_name, EMBEDDING_DIM, now, now),
+        )
+
+    def _get_text_columns(self, table: str) -> list[str]:
+        meta = self._table_meta(table)
+        if not meta:
+            return []
+        return [col for col, ctype in meta["columns"].items() if ctype in ("TEXT", "LONGTEXT")]
+
+    def _get_longtext_columns(self, table: str) -> list[str]:
+        meta = self._table_meta(table)
+        if not meta:
+            return []
+        return [col for col, ctype in meta["columns"].items() if ctype == "LONGTEXT"]
+
+    def _has_autoincrement_id(self, table: str) -> bool:
+        with self._connect() as cur:
+            cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table,))
+            row = cur.fetchone()
+        if not row or not row["sql"]:
+            return False
+        return "INTEGER PRIMARY KEY AUTOINCREMENT" in row["sql"]
+
+    @staticmethod
+    def _resolve_internal_rowid(cur: sqlite3.Cursor, table: str, user_pk: int | str) -> int | None:
+        row = cur.execute(f"SELECT rowid FROM {table} WHERE id = ?", (user_pk,)).fetchone()
+        return row[0] if row else None
+
+    def _create_fts5(
+        self, cur: sqlite3.Cursor, table: str, col: str, use_id: bool | None = None
+    ) -> None:
+        fts_name = f"{table}_fts_{col}"
+        if use_id is None:
+            use_id = self._has_autoincrement_id(table)
+        rowid_ref = "new.id" if use_id else "new.rowid"
+        old_rowid_ref = "old.id" if use_id else "old.rowid"
+        content_rowid = "id" if use_id else "rowid"
+
+        cur.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts_name} USING fts5("
+            f"{col}, content='{table}', content_rowid='{content_rowid}')"
+        )
+        cur.execute(
+            f"CREATE TRIGGER IF NOT EXISTS {table}_ai_{col} AFTER INSERT ON {table} BEGIN "
+            f"INSERT INTO {fts_name}(rowid, {col}) VALUES ({rowid_ref}, new.{col}); END"
+        )
+        cur.execute(
+            f"CREATE TRIGGER IF NOT EXISTS {table}_ad_{col} AFTER DELETE ON {table} BEGIN "
+            f"INSERT INTO {fts_name}({fts_name}, rowid, {col}) "
+            f"VALUES ('delete', {old_rowid_ref}, old.{col}); END"
+        )
+        cur.execute(
+            f"CREATE TRIGGER IF NOT EXISTS {table}_au_{col} AFTER UPDATE ON {table} BEGIN "
+            f"INSERT INTO {fts_name}({fts_name}, rowid, {col}) "
+            f"VALUES ('delete', {old_rowid_ref}, old.{col}); "
+            f"INSERT INTO {fts_name}(rowid, {col}) VALUES ({rowid_ref}, new.{col}); END"
+        )
+
+    def _drop_fts5(self, cur: sqlite3.Cursor, table: str, col: str) -> None:
+        fts_name = f"{table}_fts_{col}"
+        cur.execute(f"DROP TABLE IF EXISTS {fts_name}")
+        for suffix in ("ai", "ad", "au"):
+            cur.execute(f"DROP TRIGGER IF EXISTS {table}_{suffix}_{col}")
+
+    def _rebuild_all_fts5(self, cur: sqlite3.Cursor, table: str) -> None:
+        meta = self._table_meta(table)
+        if not meta:
+            return
+        use_id = self._has_autoincrement_id(table)
+        for col in self._get_text_columns(table):
+            self._drop_fts5(cur, table, col)
+            self._create_fts5(cur, table, col, use_id)
+
+    def create_table(self, table: str, columns: dict[str, str | Column]) -> None:
+        _validate_identifier(table, "table")
+        if "_fts_" in table:
+            raise ValueError(
+                f"Table name '{table}' contains '_fts_' which conflicts with FTS5 naming convention"
+            )
+        col_defs: list[str] = []
+        parsed: dict[str, str] = {}
+        has_custom_pk = any(
+            "PRIMARY KEY" in _column_spec(spec).upper() and name == "id"
+            for name, spec in columns.items()
+        )
+        if not has_custom_pk:
+            col_defs.append("id INTEGER PRIMARY KEY AUTOINCREMENT")
+
+        for col_name, col_spec in columns.items():
+            _validate_identifier(col_name, "column")
+            parts = _column_spec(col_spec).split()
+            base_type = parts[0].upper()
+            extras = " ".join(parts[1:]) if len(parts) > 1 else ""
+            is_pk = "PRIMARY KEY" in extras.upper()
+            if base_type == "TEXT":
+                col_defs.append(f"{col_name} TEXT{' ' + extras if extras else ''}")
+                parsed[col_name] = "TEXT" if not is_pk else "TEXT_PK"
+            elif base_type == "LONGTEXT":
+                col_defs.append(f"{col_name} TEXT{' ' + extras if extras else ''}")
+                parsed[col_name] = "LONGTEXT"
+            elif base_type == "INTEGER":
+                col_defs.append(f"{col_name} INTEGER{' ' + extras if extras else ''}")
+                parsed[col_name] = "INTEGER" if not is_pk else "INTEGER_PK"
+            elif base_type == "REAL":
+                col_defs.append(f"{col_name} REAL{' ' + extras if extras else ''}")
+                parsed[col_name] = "REAL"
+            elif base_type == "BOOLEAN":
+                col_defs.append(f"{col_name} INTEGER{' ' + extras if extras else ''}")
+                parsed[col_name] = "BOOLEAN"
+            elif base_type == "JSON":
+                col_defs.append(f"{col_name} TEXT{' ' + extras if extras else ''}")
+                parsed[col_name] = "JSON"
+            else:
+                col_defs.append(f"{col_name} TEXT{' ' + extras if extras else ''}")
+                parsed[col_name] = base_type
+
+        with self._connect() as cur:
+            cur.execute(f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(col_defs)})")
+            existing_meta = self._table_meta(table)
+            existing_cols: dict[str, str] = existing_meta["columns"] if existing_meta else {}
+            cur.execute(f"PRAGMA table_info({table})")
+            actual_cols = {row["name"] for row in cur.fetchall()}
+            for col_name, col_parsed_type in parsed.items():
+                if col_name in existing_cols or col_name in actual_cols:
+                    continue
+                sqlite_type = (
+                    "INTEGER" if col_parsed_type == "BOOLEAN"
+                    else "TEXT" if col_parsed_type in ("LONGTEXT", "JSON")
+                    else col_parsed_type.replace("_PK", "")
+                )
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {sqlite_type}")
+                logger.info("migrate_column_added table=%s column=%s type=%s", table, col_name, col_parsed_type)
+
+            text_cols = [c for c, t in parsed.items() if t in ("TEXT", "LONGTEXT")]
+            use_id = self._has_autoincrement_id(table)
+            for col in text_cols:
+                self._create_fts5(cur, table, col, use_id)
+            for col in self._get_longtext_columns_from_parsed(parsed):
+                self._get_collection(f"{table}_{col}")
+            self._save_table_meta(cur, table, parsed)
+
+        self._refresh_duckdb_table_if_registered(table)
+
+    @staticmethod
+    def _get_longtext_columns_from_parsed(parsed: dict[str, str]) -> list[str]:
+        return [col for col, ctype in parsed.items() if ctype == "LONGTEXT"]
+
+    def add_column(self, table: str, column: str, col_type: str) -> None:
+        _validate_identifier(table, "table")
+        _validate_identifier(column, "column")
+        meta = self._table_meta(table)
+        if not meta:
+            raise ValueError(f"Table '{table}' not found")
+        base_type = col_type.split()[0].upper()
+        sqlite_type = {
+            "LONGTEXT": "TEXT", "BOOLEAN": "INTEGER", "JSON": "TEXT",
+        }.get(base_type, base_type)
+        extras = " ".join(col_type.split()[1:]) if len(col_type.split()) > 1 else ""
+        col_def = f"{column} {sqlite_type}{' ' + extras if extras else ''}"
+
+        with self._connect() as cur:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+            new_columns = dict(meta["columns"])
+            new_columns[column] = base_type
+            if base_type in ("TEXT", "LONGTEXT"):
+                self._create_fts5(cur, table, column, self._has_autoincrement_id(table))
+            if base_type == "LONGTEXT":
+                self._get_collection(f"{table}_{column}")
+            self._save_table_meta(cur, table, new_columns, dirty=(base_type == "LONGTEXT"))
+        self._refresh_duckdb_table_if_registered(table)
+
+    def drop_column(self, table: str, column: str) -> None:
+        _validate_identifier(table, "table")
+        _validate_identifier(column, "column")
+        meta = self._table_meta(table)
+        if not meta or column not in meta["columns"]:
+            raise ValueError(f"Column '{column}' not found in table '{table}'")
+        col_type = meta["columns"][column]
+        old_columns = {k: v for k, v in meta["columns"].items() if k != column}
+
+        with self._connect() as cur:
+            old_table = f"_{table}_old"
+            cur.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
+            new_col_defs = ["id INTEGER PRIMARY KEY AUTOINCREMENT"]
+            for cname, ctype in old_columns.items():
+                sqlite_type = {"LONGTEXT": "TEXT", "BOOLEAN": "INTEGER", "JSON": "TEXT"}.get(ctype, ctype)
+                new_col_defs.append(f"{cname} {sqlite_type}")
+            cur.execute(f"CREATE TABLE {table} ({', '.join(new_col_defs)})")
+            shared = [c for c in old_columns if c in meta["columns"]]
+            col_list = ", ".join(shared)
+            cur.execute(f"INSERT INTO {table} ({col_list}) SELECT {col_list} FROM {old_table}")
+            cur.execute(f"DROP TABLE {old_table}")
+            self._save_table_meta(cur, table, old_columns, dirty=True)
+            if col_type in ("TEXT", "LONGTEXT"):
+                self._drop_fts5(cur, table, column)
+            self._rebuild_all_fts5(cur, table)
+            if col_type == "LONGTEXT" and self._chroma is not None:
+                try:
+                    self._chroma.delete_collection(f"{table}_{column}")
+                except Exception:
+                    pass
+            for lt_col in self._get_longtext_columns_from_parsed(old_columns):
+                now = _now_iso()
+                cur.execute(
+                    "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
+                    "VALUES (?, NULL, ?, 'meta_update', ?)",
+                    (table, lt_col, now),
+                )
+        self._refresh_duckdb_table_if_registered(table)
+
+    def rename_column(self, table: str, old_name: str, new_name: str) -> None:
+        _validate_identifier(table, "table")
+        _validate_identifier(old_name, "column")
+        _validate_identifier(new_name, "column")
+        meta = self._table_meta(table)
+        if not meta or old_name not in meta["columns"]:
+            raise ValueError(f"Column '{old_name}' not found in table '{table}'")
+        col_type = meta["columns"][old_name]
+        new_columns = {}
+        for k, v in meta["columns"].items():
+            new_columns[new_name if k == old_name else k] = v
+
+        with self._connect() as cur:
+            cur.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
+            if col_type in ("TEXT", "LONGTEXT"):
+                self._drop_fts5(cur, table, old_name)
+                self._create_fts5(cur, table, new_name, self._has_autoincrement_id(table))
+            if col_type == "LONGTEXT" and self._chroma is not None:
+                try:
+                    old_coll = self._get_collection(f"{table}_{old_name}")
+                    if old_coll is not None:
+                        all_data = old_coll.get(include=["embeddings", "documents", "metadatas"])
+                        if all_data.get("ids"):
+                            new_coll = self._get_collection(f"{table}_{new_name}")
+                            new_coll.upsert(
+                                ids=all_data["ids"], embeddings=all_data["embeddings"],
+                                documents=all_data["documents"], metadatas=all_data.get("metadatas"),
+                            )
+                        self._chroma.delete_collection(f"{table}_{old_name}")
+                except Exception as e:
+                    logger.warning("rename_chroma_failed table=%s old=%s new=%s error=%s", table, old_name, new_name, e)
+            for lt_col in self._get_longtext_columns_from_parsed(new_columns):
+                now = _now_iso()
+                cur.execute(
+                    "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
+                    "VALUES (?, NULL, ?, 'meta_update', ?)",
+                    (table, lt_col, now),
+                )
+            self._save_table_meta(cur, table, new_columns, dirty=True)
+        self._refresh_duckdb_table_if_registered(table)
+
+    def list_tables(self) -> list[str]:
+        with self._connect() as cur:
+            cur.execute("SELECT table_name FROM _schema ORDER BY table_name")
+            tables = [row["table_name"] for row in cur.fetchall()]
+        return [t for t in tables if t not in _SYSTEM_TABLES and not t.startswith("_")]
+
+    def get_schema(self, table: str) -> dict[str, str]:
+        _validate_identifier(table, "table")
+        meta = self._table_meta(table)
+        if not meta:
+            return {}
+        return meta["columns"]
+

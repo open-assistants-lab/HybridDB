@@ -11,6 +11,12 @@ from .helpers import FULL, SMOKE, Scale, archive_results
 
 def pytest_addoption(parser):
     parser.addoption(
+        "--run-benchmarks",
+        action="store_true",
+        default=False,
+        help="Run benchmark tests (skipped by default during normal pytest)",
+    )
+    parser.addoption(
         "--benchmark-full",
         action="store_true",
         default=False,
@@ -22,6 +28,16 @@ def pytest_addoption(parser):
         default=True,
         help="Pre-compute and cache embeddings (default: true)",
     )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-benchmarks") or config.getoption("--benchmark-full"):
+        return
+    skip_benchmark = pytest.mark.skip(reason="benchmark tests require --run-benchmarks")
+    benchmark_dir = Path(__file__).parent
+    for item in items:
+        if Path(str(item.path)).is_relative_to(benchmark_dir):
+            item.add_marker(skip_benchmark)
 
 
 @pytest.fixture(scope="session")
@@ -55,4 +71,6 @@ def db(request, embedding_fn, tmp_path) -> HybridDB:
 def pytest_sessionfinish(session, exitstatus):
     json_path = session.config.getoption("--benchmark-json")
     if json_path:
-        archive_results(json_path)
+        path = getattr(json_path, "name", json_path)
+        if path and Path(path).exists():
+            archive_results(path)

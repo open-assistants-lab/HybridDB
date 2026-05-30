@@ -7,24 +7,21 @@
 **SQLite + FTS5 + ChromaDB with a self-healing journal.** One Python class that gives you keyword search, vector search, SQL queries, and structured filtering — all kept in sync automatically.
 
 ```python
-from hybriddb import HybridDB, SearchMode
+from hybriddb import HybridDB, LONGTEXT, TEXT
 
 db = HybridDB("./my_data")
-db.create_table("docs", {"title": "TEXT", "body": "LONGTEXT", "tags": "JSON"})
+db.create_table("docs", {"title": TEXT, "body": LONGTEXT})
 
 db.insert("docs", {"title": "Getting Started", "body": "A guide to using HybridDB..."})
 db.insert("docs", {"title": "API Reference", "body": "Full API documentation..."})
 
-# Keyword search
-db.search("docs", "body", "getting started", mode=SearchMode.KEYWORD)
+# Search every text column
+db.search("docs", "getting started")
 
-# Semantic search
-db.search("docs", "body", "how do I begin", mode=SearchMode.SEMANTIC)
+# Search one column
+db.search("docs", "body", "how do I begin", mode="hybrid")
 
-# Hybrid search (keyword + semantic, RRF fusion)
-db.search("docs", "body", "how to get started", mode=SearchMode.HYBRID)
-
-# Structured query
+# Structured query with parameters
 db.query("docs", where="title LIKE ?", params=("%start%",))
 ```
 
@@ -43,9 +40,15 @@ HybridDB does all of that once, done right.
 | Recency-weighted scoring | ✅ |
 | Schema management (create, add/drop/rename columns) | ✅ |
 | Self-healing journal (crash recovery) | ✅ |
-| Sync/async-friendly (thread-safe, bring your own async) | ✅ |
+| Sync + async APIs | ✅ |
 | No external API dependencies (works offline) | ✅ |
 | Embedding model pluggable (sentence-transformers, OpenAI, custom) | ✅ |
+
+## Documentation
+
+- [API reference](docs/API.md) — stable public methods, sync/async examples, graph and OLAP facades
+- [Benchmarks](docs/BENCHMARKS.md) — smoke vs full benchmark commands and expected runtime behavior
+- [Release guide](docs/RELEASE.md) — local build, wheel smoke test, TestPyPI/PyPI publishing
 
 ## Installation
 
@@ -53,11 +56,7 @@ HybridDB does all of that once, done right.
 pip install hybriddb
 ```
 
-For real embedding quality, install with sentence-transformers:
-
-```bash
-pip install hybriddb[sentence-transformers]
-```
+HybridDB uses ChromaDB's bundled local MiniLM embedding by default. No API key required.
 
 ## Core Concepts
 
@@ -80,17 +79,52 @@ HybridDB maps Python-friendly types to SQLite storage and automatically sets up 
 ### Search Modes
 
 ```python
+from hybriddb import HYBRID, LONGTEXT, TEXT, Column, SearchMode
+
+db.create_table("docs", {"title": Column(TEXT), "body": LONGTEXT})
+
 # Keyword only — fast, exact, great for names and titles
-db.search("contacts", "name", "Alice", mode=SearchMode.KEYWORD)
+db.search("contacts", "name", "Alice", mode="keyword")
 
 # Semantic only — finds "9am standup" when searching for "morning meetings"
 db.search("memories", "content", "team rituals", mode=SearchMode.SEMANTIC)
 
 # Hybrid — best of both, RRF fusion, the default
 db.search("docs", "body", "getting started guide", mode=SearchMode.HYBRID)
+db.search("docs", "body", "getting started guide", mode=HYBRID)
 
 # Search across ALL text columns at once
-db.search_all("contacts", "engineering manager")
+db.search("contacts", "engineering manager")
+db.search_columns("contacts", "engineering manager")
+```
+
+### Async API
+
+All core operations have async wrappers that run blocking SQLite/ChromaDB work in a worker thread:
+
+```python
+await db.acreate_table("messages", {"content": LONGTEXT})
+await db.ainsert("messages", {"content": "async-safe memory"})
+results = await db.asearch("messages", "content", "memory")
+```
+
+### Public Cursor
+
+For small custom SQL reads or migrations, use the public cursor context manager:
+
+```python
+with db.cursor() as cur:
+    cur.execute("SELECT COUNT(*) FROM messages")
+    count = cur.fetchone()[0]
+```
+
+### Namespaced Advanced APIs
+
+Graph and OLAP helpers remain available on `HybridDB`, with namespaced facades for discovery:
+
+```python
+node_id = db.graph.add_node("Alice", type="person")
+rows = db.olap.query("SELECT COUNT(*) AS total FROM messages")
 ```
 
 ### Recency Scoring
@@ -131,7 +165,7 @@ result = db.reconcile("contacts")
 
 ## Custom Embedding Models
 
-By default, HybridDB uses a deterministic hash-based embedding — works offline, no dependencies, but lower semantic quality. Plug in any embedding function:
+By default, HybridDB uses ChromaDB's bundled local MiniLM embedding. Plug in any embedding function if you want a specific model or provider:
 
 ```python
 from sentence_transformers import SentenceTransformer

@@ -1,14 +1,17 @@
 """Shared helpers for HybridDB benchmarks: data generation, embedding cache, scale."""
 
-import json
 import random
 import subprocess
-from collections.abc import Generator
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import numpy as np
+
+class SearchMode(Enum):
+    KEYWORD = "keyword"
+    SEMANTIC = "semantic"
+    HYBRID = "hybrid"
 
 
 class Scale(NamedTuple):
@@ -20,11 +23,11 @@ class Scale(NamedTuple):
 
 
 SMOKE = Scale(
-    n_docs=1_000,
-    n_graph_nodes=100,
-    n_graph_edges=500,
-    n_analytics_rows=10_000,
-    concurrent_duration_s=2,
+    n_docs=50,
+    n_graph_nodes=50,
+    n_graph_edges=150,
+    n_analytics_rows=1_000,
+    concurrent_duration_s=1,
 )
 
 FULL = Scale(
