@@ -37,9 +37,12 @@ HybridDB does all of that once, done right.
 | FTS5 keyword search with BM25 scoring | ✅ |
 | ChromaDB semantic/vector search with HNSW | ✅ |
 | Hybrid search (RRF fusion of keyword + semantic) | ✅ |
+| DuckDB columnar analytics (optional) | ✅ |
+| NetworkX graph algorithms (optional) | ✅ |
 | Recency-weighted scoring | ✅ |
 | Schema management (create, add/drop/rename columns) | ✅ |
 | Self-healing journal (crash recovery) | ✅ |
+| Import/export, backup/restore | ✅ |
 | Sync + async APIs | ✅ |
 | No external API dependencies (works offline) | ✅ |
 | Embedding model pluggable (sentence-transformers, OpenAI, custom) | ✅ |
@@ -176,6 +179,17 @@ db = HybridDB("./data", embedding_fn=lambda text: model.encode(text).tolist())
 
 Works with any embedding provider — OpenAI, Cohere, Hugging Face, local models.
 
+## Built On
+
+| Technology | Role |
+|-----------|------|
+| [SQLite](https://sqlite.org) | Primary store, WAL mode, row-level CRUD |
+| [FTS5](https://sqlite.org/fts5.html) | Keyword search with BM25 scoring |
+| [ChromaDB](https://trychroma.com) | Vector/semantic search with HNSW index |
+| [DuckDB](https://duckdb.org) | Columnar analytics (optional) |
+| [NetworkX](https://networkx.org) | Graph algorithms — PageRank, shortest path, community detection (optional) |
+| [sentence-transformers](https://sbert.net) | Custom embedding model support (optional) |
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
@@ -184,7 +198,7 @@ MIT — see [LICENSE](LICENSE).
 
 Eddy Xu
 
-Inspired by [claude-mem](https://github.com/thedotmack/claude-mem) by [Matt Mack](https://github.com/thedotmack).
+Inspired by [claude-mem](https://github.com/thedotmack/claude-mem) by [Matt Mack](https://github.com/thedotmack) and [Claude Code](https://github.com/anthropics/claude-code) by [Anthropic](https://anthropic.com).
 
 ## Status
 
