@@ -1,36 +1,22 @@
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import sqlite3
 import struct
 import tempfile
-import uuid
-from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from hybriddb.embedding import EMBEDDING_DIM
-from hybriddb.types import Column, SearchMode
 from hybriddb.utils import (
     CHROMA_BATCH,
-    JOURNAL_CAP,
-    RRF_K,
     _CHROMA_INDEX_MAX_ELEMENTS,
     _CHROMA_INDEX_MAX_M0,
     _CHROMA_INDEX_WARN_FACTOR,
     _CHROMA_REBUILD_BATCH,
-    _SKIP_SEARCH_COLUMNS,
-    _SYSTEM_TABLES,
-    _coerce_search_mode,
-    _column_spec,
-    _is_safe_identifier,
-    _now_iso,
-    _sanitize_fts_query,
     _validate_identifier,
-    _validate_order_by,
 )
 
 logger = logging.getLogger("hybriddb")
@@ -274,4 +260,265 @@ class MaintenanceMixin:
                 self._duckdb_conn.close()
             except Exception:
                 pass
+
+    # ── Import/Export & SQL Utilities ──────────────────────────────────────
+
+    def backup(self, path: str | Path) -> None:
+        """Copy the entire database directory atomically.
+
+        Flushes the journal and checkpoints the WAL before copying,
+        then copies all files (SQLite, ChromaDB vectors, DuckDB analytics).
+
+        Args:
+            path: Destination directory. Must not exist or must be empty.
+        """
+        dest = Path(path).resolve()
+        dest_exists = dest.exists()
+        if dest_exists and any(dest.iterdir()):
+            raise FileExistsError(f"Destination must not exist or be empty: {dest}")
+        if dest_exists:
+            shutil.rmtree(str(dest))
+
+        with self._db_lock:
+            self._process_journal()
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+            shutil.copytree(str(self.path), str(dest))
+
+    def restore(self, path: str | Path) -> None:
+        """Replace the current database with a backup directory.
+
+        The current database is moved to a ``.old`` directory before
+        the restore. ChromaDB client pool is invalidated and reinitialized.
+
+        Args:
+            path: Source directory. Must exist and contain ``app.db``.
+                Must not be inside the current database directory.
+        """
+        src = Path(path).resolve()
+        if not src.exists() or not (src / "app.db").exists():
+            raise FileNotFoundError(f"Not a valid HybridDB directory: {src}")
+
+        if src == self.path.resolve() or str(self.path.resolve()) in str(src):
+            raise ValueError(
+                f"Restore source must be outside the current database directory. "
+                f"Got src={src} inside db={self.path.resolve()}"
+            )
+
+        with self._db_lock:
+            self._process_journal()
+
+            old = self.path.with_suffix(self.path.suffix + ".old")
+            if old.exists():
+                ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+                old = self.path.with_suffix(self.path.suffix + f".old_{ts}")
+
+            shutil.move(str(self.path), str(old))
+            shutil.copytree(str(src), str(self.path), dirs_exist_ok=True)
+
+            from hybriddb.db import _chroma_client_pool, _chroma_pool_lock
+            with _chroma_pool_lock:
+                _chroma_client_pool.pop(str(self._vector_path), None)
+            self._chroma = None
+            self._init_chroma(force=True)
+
+            if self._duckdb_conn is not None:
+                try:
+                    self._duckdb_conn.close()
+                except Exception:
+                    pass
+                self._init_duckdb()
+                self._auto_register_duckdb_tables()
+
+    def vacuum(self) -> int:
+        """Reclaim disk space by rebuilding the SQLite database file.
+
+        Returns the number of bytes freed (before minus after file size).
+
+        ChromaDB and DuckDB files are not affected.
+        """
+        before = Path(self._db_path).stat().st_size
+        conn = sqlite3.connect(self._db_path)
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+        after = Path(self._db_path).stat().st_size
+        return max(0, before - after)
+
+    def check_integrity(self) -> dict:
+        """Run diagnostic checks across SQLite, ChromaDB, and DuckDB.
+
+        Returns a structured report with ``overall`` status:
+        ``"ok"``, ``"degraded"`` (recoverable), or ``"corrupt"`` (data-loss risk).
+        """
+        result: dict[str, Any] = {
+            "sqlite_integrity": "ok",
+            "chromadb_collections": 0,
+            "chromadb_errors": [],
+            "duckdb_tables_synced": 0,
+            "duckdb_errors": [],
+            "overall": "ok",
+        }
+
+        # SQLite integrity
+        conn = sqlite3.connect(self._db_path)
+        try:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            result["sqlite_integrity"] = row[0] if row else "unknown"
+        except Exception as e:
+            result["sqlite_integrity"] = str(e)
+        finally:
+            conn.close()
+
+        if result["sqlite_integrity"] != "ok":
+            result["overall"] = "corrupt"
+
+        # ChromaDB collections
+        if self._chroma is not None:
+            try:
+                collections = self._chroma.list_collections()
+                result["chromadb_collections"] = len(collections)
+                for c in collections:
+                    name = c.name if hasattr(c, "name") else str(c)
+                    try:
+                        self._chroma.get_collection(name).count()
+                    except Exception as exc:
+                        result["chromadb_errors"].append(f"{name}: {exc}")
+            except Exception as e:
+                result["chromadb_errors"].append(str(e))
+
+        if result["chromadb_errors"] and result["overall"] != "corrupt":
+            result["overall"] = "degraded"
+
+        # DuckDB sync
+        if self._duckdb_conn is not None and self._duckdb_path:
+            try:
+                for tname in sorted(self._duckdb_synced_tables):
+                    try:
+                        dk = self._duckdb_conn
+                        quoted = self._duckdb_quote_identifier(tname)
+                        dk.execute(f"SELECT 1 FROM {quoted} LIMIT 1")
+                        result["duckdb_tables_synced"] += 1
+                    except Exception as e:
+                        result["duckdb_errors"].append(f"{tname}: {e}")
+            except Exception as e:
+                result["duckdb_errors"].append(str(e))
+
+        if result["duckdb_errors"] and result["overall"] == "ok":
+            result["overall"] = "degraded"
+
+        return result
+
+    def stats(self) -> dict:
+        """Return size and count statistics for all storage layers."""
+        result: dict[str, Any] = {
+            "sqlite_size_bytes": 0,
+            "chromadb_size_bytes": 0,
+            "duckdb_size_bytes": 0,
+            "total_size_bytes": 0,
+            "tables": {},
+        }
+
+        if Path(self._db_path).exists():
+            result["sqlite_size_bytes"] = Path(self._db_path).stat().st_size
+        if Path(self._vector_path).exists():
+            total = 0
+            for f in Path(self._vector_path).rglob("*"):
+                if f.is_file():
+                    total += f.stat().st_size
+            result["chromadb_size_bytes"] = total
+        if self._duckdb_path and Path(self._duckdb_path).exists():
+            result["duckdb_size_bytes"] = Path(self._duckdb_path).stat().st_size
+
+        result["total_size_bytes"] = (
+            result["sqlite_size_bytes"]
+            + result["chromadb_size_bytes"]
+            + result["duckdb_size_bytes"]
+        )
+
+        for table in self.list_tables():
+            meta = self._table_meta(table)
+            if not meta:
+                continue
+            lt_cols = self._get_longtext_columns(table)
+            text_cols = self._get_text_columns(table)
+            tbl_stats: dict[str, Any] = {
+                "rows": self.count(table),
+                "fts_indexes": len(text_cols),
+                "chromadb_collections": len(lt_cols),
+                "chromadb_vectors": 0,
+                "duckdb_synced": table in self._duckdb_synced_tables,
+                "duckdb_rows": (
+                    self._duckdb_synced_tables[table].get("count", 0)
+                    if table in self._duckdb_synced_tables
+                    else 0
+                ),
+            }
+            if lt_cols and self._chroma is not None:
+                total_vectors = 0
+                for col in lt_cols:
+                    try:
+                        collection = self._chroma.get_collection(f"{table}_{col}")
+                        total_vectors += collection.count()
+                    except Exception:
+                        pass
+                tbl_stats["chromadb_vectors"] = total_vectors
+            result["tables"][table] = tbl_stats
+
+        return result
+
+    def reindex(self, table: str | None = None) -> None:
+        """Rebuild ChromaDB, FTS5, and DuckDB indexes from SQLite data.
+
+        Automatically called by :meth:`import_sql`. Use for recovery when
+        ChromaDB or FTS5 indexes become corrupt.
+
+        Args:
+            table: Table name to reindex, or ``None`` to reindex all user tables.
+        """
+        tables = [table] if table else self.list_tables()
+
+        for tbl in tables:
+            lt_cols = self._get_longtext_columns(tbl)
+
+            # Rebuild FTS5
+            with self._connect() as cur:
+                self._rebuild_all_fts5(cur, tbl)
+
+            # Rebuild ChromaDB
+            if lt_cols and self._chroma is not None:
+                for col in lt_cols:
+                    collection_name = f"{tbl}_{col}"
+                    try:
+                        self._chroma.delete_collection(collection_name)
+                    except Exception:
+                        pass
+                    collection = self._chroma.get_or_create_collection(
+                        name=collection_name
+                    )
+
+                    offset = 0
+                    while True:
+                        rows = self.raw_query(
+                            f"SELECT rowid as _row, {col} FROM {tbl} "
+                            f"ORDER BY rowid LIMIT {CHROMA_BATCH} OFFSET {offset}"
+                        )
+                        if not rows:
+                            break
+                        ids_batch = [str(r["_row"]) for r in rows]
+                        docs_batch = [r[col] or "" for r in rows]
+                        emb_batch = [self._get_embedding(d) for d in docs_batch]
+                        collection.upsert(
+                            ids=ids_batch,
+                            embeddings=emb_batch,
+                            documents=docs_batch,
+                        )
+                        offset += CHROMA_BATCH
+
+            # Rebuild DuckDB
+            self._full_sync_duckdb_table(tbl)
 

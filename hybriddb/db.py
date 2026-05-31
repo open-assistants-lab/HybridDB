@@ -35,6 +35,7 @@ from hybriddb.embedding import (
     default_embedding_fn as _default_embedding_fn,
     hash_embedding as _hash_embedding,
 )
+from hybriddb.export_import import ExportImportMixin
 from hybriddb.facades import AnalyticsAPI, GraphAPI
 from hybriddb.graph import GraphMixin
 from hybriddb.journal import JournalMixin
@@ -93,6 +94,7 @@ class HybridDB(
     GraphMixin,
     AnalyticsMixin,
     MaintenanceMixin,
+    ExportImportMixin,
     AsyncMixin,
 ):
     """Hybrid search database: SQLite + FTS5 + ChromaDB + Graph + DuckDB with self-healing journal.

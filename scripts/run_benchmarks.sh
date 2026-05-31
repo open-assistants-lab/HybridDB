@@ -6,6 +6,7 @@ RESULTS_DIR="$REPO_ROOT/results"
 mkdir -p "$RESULTS_DIR"
 
 MODE="${1:-smoke}"
+shift 2>/dev/null || true
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H%M%S")
 
 BENCH_DIR="tests/benchmarks"
@@ -13,6 +14,7 @@ BENCH_DIR="tests/benchmarks"
 if [ "$MODE" = "smoke" ]; then
     echo "=== HybridDB Smoke Benchmarks ==="
     uv run pytest "$BENCH_DIR" \
+        --run-benchmarks \
         --benchmark-only \
         --benchmark-json="$RESULTS_DIR/smoke-$TIMESTAMP.json" \
         -x \
@@ -20,6 +22,7 @@ if [ "$MODE" = "smoke" ]; then
 elif [ "$MODE" = "full" ]; then
     echo "=== HybridDB Full Benchmarks ==="
     uv run pytest "$BENCH_DIR" \
+        --run-benchmarks \
         --benchmark-full \
         --benchmark-only \
         --benchmark-json="$RESULTS_DIR/full-$TIMESTAMP.json" \
@@ -27,6 +30,7 @@ elif [ "$MODE" = "full" ]; then
 elif [ "$MODE" = "e2e" ]; then
     echo "=== HybridDB Full E2E Benchmarks (live embeddings) ==="
     uv run pytest "$BENCH_DIR" \
+        --run-benchmarks \
         --benchmark-full \
         --benchmark-only \
         --precompute-embeddings=false \
