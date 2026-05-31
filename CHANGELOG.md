@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.2] — 2026-05-31
+
+### Changed
+- Capped all dependency upper bounds for supply chain safety: `chromadb>=1.5.0,<2.0`, `duckdb>=1.0.0,<2.0`, `networkx>=3.0,<4.0`, `sentence-transformers>=3.0.0,<6.0`.
+
 ## [0.4.1] — 2026-05-31
 
 ### Fixed
