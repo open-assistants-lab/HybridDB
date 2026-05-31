@@ -1,6 +1,6 @@
 # HybridDB API Reference
 
-This document describes the stable public API for HybridDB `0.3.x`.
+This document describes the stable public API for HybridDB `0.4.x`.
 
 HybridDB is one embedded database object that coordinates SQLite, FTS5, ChromaDB, a self-healing journal, optional DuckDB analytics, and optional graph helpers.
 
