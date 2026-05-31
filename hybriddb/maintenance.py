@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import sqlite3
 import struct
 import tempfile
+
+import chromadb
+from chromadb.config import Settings as ChromaSettings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -81,6 +85,7 @@ class MaintenanceMixin:
     def _rebuild_chroma_index(self) -> None:
         if self._chroma is None:
             return
+        from hybriddb.db import _chroma_client_pool, _chroma_pool_lock
         old_path = Path(self._vector_path)
         temp_root = Path(tempfile.mkdtemp(dir=old_path.parent, prefix="chroma_rebuild_"))
         temp_vectors = temp_root / "vectors"

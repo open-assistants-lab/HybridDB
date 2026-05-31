@@ -1,6 +1,9 @@
 # Changelog
 
-All notable changes to HybridDB.
+## [0.4.1] — 2026-05-31
+
+### Fixed
+- `_rebuild_chroma_index` in `maintenance.py` now imports `_chroma_client_pool` and `_chroma_pool_lock` from `hybriddb.db` (late import) instead of using stale local copies. Fixes broken ChromaDB client pooling on index rebuild.
 
 ---
 
