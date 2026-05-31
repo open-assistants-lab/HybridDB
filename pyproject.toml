@@ -22,21 +22,21 @@ classifiers = [
 ]
 
 dependencies = [
-    "chromadb>=0.5.0",
+    "chromadb>=1.5.0,<2.0",
 ]
 
 [project.optional-dependencies]
 analytics = [
-    "duckdb>=1.0.0",
+    "duckdb>=1.0.0,<2.0",
 ]
 graph = [
-    "networkx>=3.0",
+    "networkx>=3.0,<4.0",
 ]
 all = [
     "hybriddb[analytics,graph]",
 ]
 sentence-transformers = [
-    "sentence-transformers>=3.0.0",
+    "sentence-transformers>=3.0.0,<6.0",
 ]
 dev = [
     "pytest>=8.0.0",
