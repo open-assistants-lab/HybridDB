@@ -212,23 +212,25 @@ class AnalyticsMixin:
         with self._db_lock:
             dk = self._duckdb_conn
             dk.execute(f"ATTACH '{self._db_path}' AS src (TYPE sqlite)")
-            for tbl, ops in by_table.items():
-                quoted_tbl = self._duckdb_quote_identifier(tbl)
-                if ops["delete"]:
-                    ids = ",".join(str(i) for i in ops["delete"])
-                    dk.execute(f"DELETE FROM {quoted_tbl} WHERE id IN ({ids})")
-                if ops["add"]:
-                    ids = ",".join(str(i) for i in ops["add"])
+            try:
+                for tbl, ops in by_table.items():
+                    quoted_tbl = self._duckdb_quote_identifier(tbl)
+                    if ops["delete"]:
+                        ids = ",".join(str(i) for i in ops["delete"])
+                        dk.execute(f"DELETE FROM {quoted_tbl} WHERE id IN ({ids})")
+                    if ops["add"]:
+                        ids = ",".join(str(i) for i in ops["add"])
+                        dk.execute(
+                            f"INSERT INTO {quoted_tbl} SELECT * FROM src.{quoted_tbl} WHERE id IN ({ids})"
+                        )
+                    count = dk.execute(f"SELECT count(*) FROM {quoted_tbl}").fetchone()[0]
                     dk.execute(
-                        f"INSERT INTO {quoted_tbl} SELECT * FROM src.{quoted_tbl} WHERE id IN ({ids})"
+                        "UPDATE _duckdb_sync SET synced_count = ? WHERE table_name = ?",
+                        (count, tbl),
                     )
-                count = dk.execute(f"SELECT count(*) FROM {quoted_tbl}").fetchone()[0]
-                dk.execute(
-                    "UPDATE _duckdb_sync SET synced_count = ? WHERE table_name = ?",
-                    (count, tbl),
-                )
-                self._duckdb_synced_tables[tbl]["count"] = count
-            dk.execute("DETACH src")
+                    self._duckdb_synced_tables[tbl]["count"] = count
+            finally:
+                dk.execute("DETACH src")
 
     def sync_duckdb_table(self, table: str) -> None:
         _validate_identifier(table, "table")

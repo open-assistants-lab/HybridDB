@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.3] — 2026-06-09
+
+### Fixed
+- `_sync_duckdb_from_journal` in `analytics.py` now wraps the sync loop in `try/finally` so `DETACH src` always executes, even if an exception occurs mid-sync. Previously a leaked DuckDB attachment would cause all subsequent syncs to fail with `"src" already attached`.
+- `search(table, column, query=None)` in `search.py` no longer passes the column name as the query parameter to `search_all()`. Now returns the most recent rows via `query()` with no search filtering.
+
 ## [0.4.2] — 2026-05-31
 
 ### Changed

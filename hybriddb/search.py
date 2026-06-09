@@ -45,10 +45,11 @@ class SearchMixin:
     ) -> list[dict]:
         _validate_identifier(table, "table")
         if query is None:
-            return self.search_all(
-                table, column, limit=limit, fts_weight=fts_weight,
-                recency_weight=recency_weight, recency_column=recency_column,
-            )
+            rows = self.query(table, order_by="id DESC", limit=limit)
+            for r in rows:
+                r["_score"] = 0.0
+                r["_search_mode"] = "none"
+            return rows
         _validate_identifier(column, "column")
         if recency_column:
             _validate_identifier(recency_column, "recency column")
