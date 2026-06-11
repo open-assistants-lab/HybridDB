@@ -1,10 +1,13 @@
 # Changelog
 
-## [0.4.3] — 2026-06-09
+## [0.4.4] — 2026-06-11
 
 ### Fixed
-- `_sync_duckdb_from_journal` in `analytics.py` now wraps the sync loop in `try/finally` so `DETACH src` always executes, even if an exception occurs mid-sync. Previously a leaked DuckDB attachment would cause all subsequent syncs to fail with `"src" already attached`.
-- `search(table, column, query=None)` in `search.py` no longer passes the column name as the query parameter to `search_all()`. Now returns the most recent rows via `query()` with no search filtering.
+- `_sync_duckdb_from_journal` in `analytics.py` now resolves SQLite rowid back to the actual app-level id column when syncing add/update journal entries. Required for TEXT/UUID primary keys where rowid does not equal app id.
+- `crud.delete()` now stores the app-level id in the journal's `data` column so `_sync_duckdb_from_journal` can sync row deletions (the row is already gone from SQLite at sync time).
+- `_sync_duckdb_from_journal` now inspects the DuckDB id column type (BIGINT vs TEXT) to properly quote/unquote SQL values, preventing UUID quoting failures.
+- `_sync_duckdb_from_journal` wraps the sync loop in `try/finally` so `DETACH src` always executes even if an exception occurs mid-sync. Previously a leaked DuckDB attachment would cause all subsequent syncs to fail.
+- `search(table, column, query=None)` no longer passes the column name as the query parameter to `search_all()`. Now returns the most recent rows via `query()` with no search filtering.
 
 ## [0.4.2] — 2026-05-31
 
