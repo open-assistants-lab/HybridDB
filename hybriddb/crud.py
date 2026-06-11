@@ -217,9 +217,9 @@ class CrudMixin:
                 )
             now = _now_iso()
             cur.execute(
-                "INSERT INTO _journal (app_table, row_id, op, created_at) "
-                "VALUES (?, ?, 'row_delete', ?)",
-                (table, internal_rowid, now),
+                "INSERT INTO _journal (app_table, row_id, op, created_at, data) "
+                "VALUES (?, ?, 'row_delete', ?, ?)",
+                (table, internal_rowid, now, str(row_id)),
             )
         if sync:
             self._process_journal()

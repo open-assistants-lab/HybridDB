@@ -188,7 +188,9 @@ class AnalyticsMixin:
         if not self._duckdb_path or not self._duckdb_synced_tables:
             return
 
-        by_table: dict[str, dict[str, list[int]]] = {}
+        # Collect rowids (int) for add/update entries (row still exists in SQLite)
+        # and app_ids (str) for delete entries (row is gone, id stored in data field)
+        by_table: dict[str, dict[str, list[int | str]]] = {}
         seen_ids: set[int] = set()
 
         for e in entries:
@@ -199,29 +201,59 @@ class AnalyticsMixin:
             if tbl not in self._duckdb_synced_tables:
                 continue
             if tbl not in by_table:
-                by_table[tbl] = {"add": [], "delete": []}
-            row_id = e["row_id"]
-            if row_id is not None:
-                by_table[tbl]["delete"].append(row_id)
-                if e["op"] != "row_delete":
-                    by_table[tbl]["add"].append(row_id)
+                by_table[tbl] = {"add": [], "delete": [], "delete_ids": []}
+            if e["op"] == "row_delete":
+                app_id = e.get("data")
+                if app_id is not None:
+                    by_table[tbl]["delete_ids"].append(app_id)
+            elif e.get("row_id") is not None:
+                by_table[tbl]["delete"].append(e["row_id"])
+                by_table[tbl]["add"].append(e["row_id"])
 
         if not by_table:
+            return
+
+        # Resolve rowids to actual app-level ids for add entries
+        by_table_ids: dict[str, dict[str, list[str]]] = {}
+        for tbl, ops in by_table.items():
+            by_table_ids[tbl] = {"add": [], "delete": []}
+            add_rowids = ops.get("add", [])
+            if add_rowids:
+                quoted_tbl = self._duckdb_quote_identifier(tbl)
+                with self._connect() as cur:
+                    placeholders = ",".join("?" * len(add_rowids))
+                    rows = cur.execute(
+                        f"SELECT rowid, id FROM {quoted_tbl} WHERE rowid IN ({placeholders})",
+                        add_rowids,
+                    ).fetchall()
+                rid_to_id = {r[0]: str(r[1]) for r in rows}
+                by_table_ids[tbl]["add"] = [rid_to_id[rid] for rid in add_rowids if rid in rid_to_id]
+                by_table_ids[tbl]["delete"] = [rid_to_id[rid] for rid in ops["delete"] if rid in rid_to_id]
+            by_table_ids[tbl]["delete"].extend(ops.get("delete_ids", []))
+
+        if not any(v["add"] or v["delete"] for v in by_table_ids.values()):
             return
 
         with self._db_lock:
             dk = self._duckdb_conn
             dk.execute(f"ATTACH '{self._db_path}' AS src (TYPE sqlite)")
             try:
-                for tbl, ops in by_table.items():
+                for tbl, ops in by_table_ids.items():
                     quoted_tbl = self._duckdb_quote_identifier(tbl)
+                    id_is_int = "id" not in self._duckdb_synced_tables.get(tbl, {}).get("columns", {})
                     if ops["delete"]:
-                        ids = ",".join(str(i) for i in ops["delete"])
-                        dk.execute(f"DELETE FROM {quoted_tbl} WHERE id IN ({ids})")
+                        if id_is_int:
+                            id_list = ",".join(id for id in ops["delete"])
+                        else:
+                            id_list = ",".join(f"'{id}'" for id in ops["delete"])
+                        dk.execute(f"DELETE FROM {quoted_tbl} WHERE id IN ({id_list})")
                     if ops["add"]:
-                        ids = ",".join(str(i) for i in ops["add"])
+                        if id_is_int:
+                            id_list = ",".join(id for id in ops["add"])
+                        else:
+                            id_list = ",".join(f"'{id}'" for id in ops["add"])
                         dk.execute(
-                            f"INSERT INTO {quoted_tbl} SELECT * FROM src.{quoted_tbl} WHERE id IN ({ids})"
+                            f"INSERT INTO {quoted_tbl} SELECT * FROM src.{quoted_tbl} WHERE id IN ({id_list})"
                         )
                     count = dk.execute(f"SELECT count(*) FROM {quoted_tbl}").fetchone()[0]
                     dk.execute(
