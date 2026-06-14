@@ -45,7 +45,8 @@ class SearchMixin:
     ) -> list[dict]:
         _validate_identifier(table, "table")
         if query is None:
-            rows = self.query(table, order_by="id DESC", limit=limit)
+            pk_col = self._get_pk_column(table)
+            rows = self.query(table, order_by=f"{pk_col} DESC", limit=limit)
             for r in rows:
                 r["_score"] = 0.0
                 r["_search_mode"] = "none"
@@ -97,6 +98,14 @@ class SearchMixin:
             results.append(row)
         return results[:limit]
 
+    def _matches_where(self, row: dict, where: dict) -> bool:
+        for key, value in where.items():
+            if key not in row:
+                return False
+            if row[key] != value:
+                return False
+        return True
+
     def search_all(
         self, table: str, query: str, where: dict | None = None,
         limit: int = 10, fts_weight: float = 0.5,
@@ -131,6 +140,8 @@ class SearchMixin:
             row = rows.get(row_id)
             if row is None:
                 continue
+            if where and not self._matches_where(row, where):
+                continue
             final_score = score
             if recency_weight > 0 and recency_column:
                 ts_str = row.get(recency_column)
@@ -158,8 +169,8 @@ class SearchMixin:
             return []
 
         fts_table = f"{table}_fts_{column}"
-        use_id = self._has_autoincrement_id(table)
-        join_col = "m.id" if use_id else "m.rowid"
+        rowid_col = self._get_rowid_ref(table)
+        join_col = "m.rowid" if rowid_col == "rowid" else f"m.{rowid_col}"
 
         try:
             with self._connect() as cur:
@@ -176,7 +187,7 @@ class SearchMixin:
                 escaped = query.replace("%", "\\%").replace("_", "\\_")
                 with self._connect() as cur:
                     cur.execute(
-                        f"SELECT id, 0.0 as score FROM {table} WHERE {column} LIKE ? LIMIT ?",
+                        f"SELECT {rowid_col} as id, 0.0 as score FROM {table} WHERE {column} LIKE ? LIMIT ?",
                         (f"%{escaped}%", limit),
                     )
                     rows = cur.fetchall()
@@ -239,17 +250,12 @@ class SearchMixin:
     def _fetch_rows_by_ids(self, table: str, ids: list[int | str]) -> dict[int | str, dict]:
         if not ids:
             return {}
-        has_auto_id = self._has_autoincrement_id(table)
         with self._connect() as cur:
+            lookup_col = self._get_rowid_ref(table, cur=cur)
             placeholders = ",".join("?" * len(ids))
-            if has_auto_id:
-                cur.execute(
-                    f"SELECT *, id as _lookup_id FROM {table} WHERE id IN ({placeholders})", ids,
-                )
-            else:
-                cur.execute(
-                    f"SELECT *, rowid as _lookup_id FROM {table} WHERE rowid IN ({placeholders})", ids,
-                )
+            cur.execute(
+                f"SELECT *, {lookup_col} as _lookup_id FROM {table} WHERE {lookup_col} IN ({placeholders})", ids,
+            )
             rows = cur.fetchall()
         result = {}
         for r in rows:

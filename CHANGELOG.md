@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.5] — 2026-06-15
+
+### Fixed
+- `drop_column` no longer leaves stale FTS5 triggers for the dropped column, preventing "no such column" errors on subsequent inserts. Root cause: `_table_meta()` opened a new connection inside the transaction and couldn't see uncommitted `_save_table_meta` changes. Added optional `cur` parameter to `_table_meta`, `_get_text_columns`, `_get_longtext_columns`, and `_has_autoincrement_id` so `_rebuild_all_fts5` reads from the same connection. (#bug)
+- `insert`/`update`/`insert_batch` now `json.dumps` dict/list values for `JSON`-typed columns instead of crashing with "Error binding parameter: type 'dict' is not supported". (#bug)
+- `search_all`/`search_columns` now actually apply the `where` parameter (equality post-filter) instead of silently ignoring it. Added `_matches_where` helper. (#bug)
+- `_is_hnsw_header_corrupt` now uses correct binary offsets for Chroma's `header.bin` (which has a 4-byte `PERSISTENCE_VERSION` prefix). Previously every header was flagged corrupt, triggering unnecessary index rebuilds. Also removed unused `link_path` parameter. (#bug)
+- `create_table` now detects PRIMARY KEY on any column name (not just `id`), preventing duplicate PK definitions with custom-named primary keys. (#bug)
+- Custom-named `INTEGER PRIMARY KEY AUTOINCREMENT` columns (e.g., `my_pk`) are now fully supported across insert, update, delete, get, batch insert, FTS search, and drop_column. Previously all downstream code hardcoded `WHERE id = ?` and `new.id`/`old.id` in FTS triggers. Added `_get_pk_column()` (for WHERE clauses) and `_get_rowid_ref()` (for FTS rowid references — only INTEGER PKs alias rowid). (#bug)
+- `TEXT PRIMARY KEY` columns now correctly use `rowid` for FTS triggers and joins, avoiding "datatype mismatch" errors. (#bug)
+
 ## [0.4.4] — 2026-06-11
 
 ### Fixed

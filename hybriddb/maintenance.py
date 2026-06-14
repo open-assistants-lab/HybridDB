@@ -43,7 +43,7 @@ class MaintenanceMixin:
 
             size_bytes = link_file.stat().st_size
             size_gb = size_bytes / (1024**3)
-            header_corrupt = self._is_hnsw_header_corrupt(str(header_file), str(link_file))
+            header_corrupt = self._is_hnsw_header_corrupt(str(header_file))
 
             if size_bytes >= warn_bytes or header_corrupt:
                 logger.warning(
@@ -63,15 +63,20 @@ class MaintenanceMixin:
                     return
 
     @staticmethod
-    def _is_hnsw_header_corrupt(header_path: str, link_path: str) -> bool:
+    def _is_hnsw_header_corrupt(header_path: str) -> bool:
         try:
             with open(header_path, "rb") as f:
                 data = f.read()
-            if len(data) < 68:
+            # header.bin layout: 4-byte version prefix, then struct fields
+            # See chroma-hnswlib hnswalg.h persistHeader()
+            if len(data) < 100:
                 return True
-            max_elements = struct.unpack_from("Q", data, 8)[0]
-            size_data_per_element = struct.unpack_from("Q", data, 24)[0]
-            max_m0 = struct.unpack_from("I", data, 56)[0]
+            version = struct.unpack_from("i", data, 0)[0]
+            if version != 1:
+                return True
+            max_elements = struct.unpack_from("Q", data, 12)[0]
+            size_data_per_element = struct.unpack_from("Q", data, 28)[0]
+            max_m0 = struct.unpack_from("Q", data, 68)[0]
             if max_elements == 0 or max_elements > _CHROMA_INDEX_MAX_ELEMENTS:
                 return True
             if size_data_per_element != EMBEDDING_DIM * 4:

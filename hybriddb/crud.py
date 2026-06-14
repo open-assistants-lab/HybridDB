@@ -65,21 +65,23 @@ class CrudMixin:
         filtered = {k: v for k, v in data.items() if k in meta["columns"]}
         columns = list(filtered.keys())
         placeholders = ", ".join("?" * len(columns))
-        values = list(filtered.values())
+        col_types = meta["columns"]
+        values = []
+        for c in columns:
+            v = filtered[c]
+            if isinstance(v, (dict, list)) and col_types.get(c) == "JSON":
+                v = json.dumps(v, default=str)
+            values.append(v)
 
         with self._connect() as cur:
             cur.execute(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})", values)
             internal_rowid = cur.lastrowid
-            has_auto_id = self._has_autoincrement_id(table)
-            if has_auto_id:
-                user_pk = internal_rowid
-                row = dict(cur.execute(f"SELECT * FROM {table} WHERE id = ?", (user_pk,)).fetchone())
-            elif "id" in filtered:
-                user_pk = filtered["id"]
-                row = dict(cur.execute(f"SELECT * FROM {table} WHERE id = ?", (user_pk,)).fetchone())
+            pk_col = self._get_pk_column(table, cur=cur)
+            if pk_col in filtered:
+                user_pk = filtered[pk_col]
             else:
                 user_pk = internal_rowid
-                row = dict(cur.execute(f"SELECT * FROM {table} WHERE rowid = ?", (internal_rowid,)).fetchone())
+            row = dict(cur.execute(f"SELECT * FROM {table} WHERE {pk_col} = ?", (user_pk,)).fetchone())
 
             metadata = self._row_to_metadata(table, row)
             now = _now_iso()
@@ -128,24 +130,26 @@ class CrudMixin:
         ids: list[int | str] = []
         with self._connect() as cur:
             now = _now_iso()
+            pk_col = self._get_pk_column(table, cur=cur)
             for data in rows:
                 filtered = {k: v for k, v in data.items() if k in meta["columns"]}
                 columns = list(filtered.keys())
                 placeholders = ", ".join("?" * len(columns))
-                values = list(filtered.values())
+                col_types = meta["columns"]
+                values = []
+                for c in columns:
+                    v = filtered[c]
+                    if isinstance(v, (dict, list)) and col_types.get(c) == "JSON":
+                        v = json.dumps(v, default=str)
+                    values.append(v)
                 cur.execute(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})", values)
                 internal_rowid = cur.lastrowid
-                has_auto_id = self._has_autoincrement_id(table)
-                if has_auto_id:
-                    user_pk = internal_rowid
-                    row = dict(cur.execute(f"SELECT * FROM {table} WHERE id = ?", (user_pk,)).fetchone())
-                elif "id" in filtered:
-                    user_pk = filtered["id"]
-                    row = dict(cur.execute(f"SELECT * FROM {table} WHERE id = ?", (user_pk,)).fetchone())
+                if pk_col in filtered:
+                    user_pk = filtered[pk_col]
                 else:
                     assert internal_rowid is not None
                     user_pk = internal_rowid
-                    row = dict(cur.execute(f"SELECT * FROM {table} WHERE rowid = ?", (internal_rowid,)).fetchone())
+                row = dict(cur.execute(f"SELECT * FROM {table} WHERE {pk_col} = ?", (user_pk,)).fetchone())
                 ids.append(user_pk)
                 metadata = self._row_to_metadata(table, row)
                 for col in self._get_longtext_columns(table):
@@ -172,15 +176,24 @@ class CrudMixin:
         if not filtered:
             return False
 
+        col_types = meta["columns"]
+        values = []
+        for c in filtered:
+            v = filtered[c]
+            if isinstance(v, (dict, list)) and col_types.get(c) == "JSON":
+                v = json.dumps(v, default=str)
+            values.append(v)
+
         with self._connect() as cur:
-            internal_rowid = self._resolve_internal_rowid(cur, table, row_id)
+            pk_col = self._get_pk_column(table, cur=cur)
+            internal_rowid = self._resolve_internal_rowid(cur, table, row_id, pk_col)
             if internal_rowid is None:
                 return False
             set_clause = ", ".join(f"{k} = ?" for k in filtered.keys())
-            cur.execute(f"UPDATE {table} SET {set_clause} WHERE id = ?", list(filtered.values()) + [row_id])
+            cur.execute(f"UPDATE {table} SET {set_clause} WHERE {pk_col} = ?", values + [row_id])
             if cur.rowcount == 0:
                 return False
-            row = dict(cur.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone())
+            row = dict(cur.execute(f"SELECT * FROM {table} WHERE {pk_col} = ?", (row_id,)).fetchone())
             metadata = self._row_to_metadata(table, row)
             for col in self._get_longtext_columns(table):
                 now = _now_iso()
@@ -202,10 +215,11 @@ class CrudMixin:
     def delete(self, table: str, row_id: int | str, sync: bool = True) -> bool:
         _validate_identifier(table, "table")
         with self._connect() as cur:
-            internal_rowid = self._resolve_internal_rowid(cur, table, row_id)
+            pk_col = self._get_pk_column(table, cur=cur)
+            internal_rowid = self._resolve_internal_rowid(cur, table, row_id, pk_col)
             if internal_rowid is None:
                 return False
-            cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+            cur.execute(f"DELETE FROM {table} WHERE {pk_col} = ?", (row_id,))
             if cur.rowcount == 0:
                 return False
             for col in self._get_longtext_columns(table):
@@ -228,7 +242,8 @@ class CrudMixin:
     def get(self, table: str, row_id: int | str) -> dict | None:
         _validate_identifier(table, "table")
         with self._connect() as cur:
-            cur.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,))
+            pk_col = self._get_pk_column(table, cur=cur)
+            cur.execute(f"SELECT * FROM {table} WHERE {pk_col} = ?", (row_id,))
             row = cur.fetchone()
         if not row:
             return None

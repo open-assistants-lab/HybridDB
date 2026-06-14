@@ -36,8 +36,12 @@ from hybriddb.utils import (
 logger = logging.getLogger("hybriddb")
 
 class SchemaMixin:
-    def _table_meta(self, table: str) -> dict[str, Any] | None:
-        with self._connect() as cur:
+    def _table_meta(self, table: str, cur: sqlite3.Cursor | None = None) -> dict[str, Any] | None:
+        if cur is None:
+            with self._connect() as cur:
+                cur.execute("SELECT * FROM _schema WHERE table_name = ?", (table,))
+                row = cur.fetchone()
+        else:
             cur.execute("SELECT * FROM _schema WHERE table_name = ?", (table,))
             row = cur.fetchone()
         if not row:
@@ -64,40 +68,70 @@ class SchemaMixin:
              self._embedding_model_name, EMBEDDING_DIM, now, now),
         )
 
-    def _get_text_columns(self, table: str) -> list[str]:
-        meta = self._table_meta(table)
+    def _get_text_columns(self, table: str, cur: sqlite3.Cursor | None = None) -> list[str]:
+        meta = self._table_meta(table, cur=cur)
         if not meta:
             return []
         return [col for col, ctype in meta["columns"].items() if ctype in ("TEXT", "LONGTEXT")]
 
-    def _get_longtext_columns(self, table: str) -> list[str]:
-        meta = self._table_meta(table)
+    def _get_longtext_columns(self, table: str, cur: sqlite3.Cursor | None = None) -> list[str]:
+        meta = self._table_meta(table, cur=cur)
         if not meta:
             return []
         return [col for col, ctype in meta["columns"].items() if ctype == "LONGTEXT"]
 
-    def _has_autoincrement_id(self, table: str) -> bool:
-        with self._connect() as cur:
+    def _has_autoincrement_id(self, table: str, cur: sqlite3.Cursor | None = None) -> bool:
+        if cur is None:
+            with self._connect() as cur:
+                cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table,))
+                row = cur.fetchone()
+        else:
             cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table,))
             row = cur.fetchone()
         if not row or not row["sql"]:
             return False
         return "INTEGER PRIMARY KEY AUTOINCREMENT" in row["sql"]
 
+    def _get_pk_column(self, table: str, cur: sqlite3.Cursor | None = None) -> str:
+        if cur is None:
+            with self._connect() as cur:
+                cur.execute(f"PRAGMA table_info({table})")
+                rows = cur.fetchall()
+        else:
+            cur.execute(f"PRAGMA table_info({table})")
+            rows = cur.fetchall()
+        for row in rows:
+            if row["pk"] > 0:
+                return row["name"]
+        return "rowid"
+
+    def _get_rowid_ref(self, table: str, cur: sqlite3.Cursor | None = None) -> str:
+        if cur is None:
+            with self._connect() as cur:
+                cur.execute(f"PRAGMA table_info({table})")
+                rows = cur.fetchall()
+        else:
+            cur.execute(f"PRAGMA table_info({table})")
+            rows = cur.fetchall()
+        for row in rows:
+            if row["pk"] > 0 and "INT" in (row["type"] or "").upper():
+                return row["name"]
+        return "rowid"
+
     @staticmethod
-    def _resolve_internal_rowid(cur: sqlite3.Cursor, table: str, user_pk: int | str) -> int | None:
-        row = cur.execute(f"SELECT rowid FROM {table} WHERE id = ?", (user_pk,)).fetchone()
+    def _resolve_internal_rowid(cur: sqlite3.Cursor, table: str, user_pk: int | str, pk_col: str = "id") -> int | None:
+        row = cur.execute(f"SELECT rowid FROM {table} WHERE {pk_col} = ?", (user_pk,)).fetchone()
         return row[0] if row else None
 
     def _create_fts5(
-        self, cur: sqlite3.Cursor, table: str, col: str, use_id: bool | None = None
+        self, cur: sqlite3.Cursor, table: str, col: str, rowid_col: str | None = None
     ) -> None:
         fts_name = f"{table}_fts_{col}"
-        if use_id is None:
-            use_id = self._has_autoincrement_id(table)
-        rowid_ref = "new.id" if use_id else "new.rowid"
-        old_rowid_ref = "old.id" if use_id else "old.rowid"
-        content_rowid = "id" if use_id else "rowid"
+        if rowid_col is None:
+            rowid_col = self._get_rowid_ref(table, cur=cur)
+        rowid_ref = f"new.{rowid_col}"
+        old_rowid_ref = f"old.{rowid_col}"
+        content_rowid = rowid_col
 
         cur.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts_name} USING fts5("
@@ -126,13 +160,13 @@ class SchemaMixin:
             cur.execute(f"DROP TRIGGER IF EXISTS {table}_{suffix}_{col}")
 
     def _rebuild_all_fts5(self, cur: sqlite3.Cursor, table: str) -> None:
-        meta = self._table_meta(table)
+        meta = self._table_meta(table, cur=cur)
         if not meta:
             return
-        use_id = self._has_autoincrement_id(table)
-        for col in self._get_text_columns(table):
+        rowid_col = self._get_rowid_ref(table, cur=cur)
+        for col in self._get_text_columns(table, cur=cur):
             self._drop_fts5(cur, table, col)
-            self._create_fts5(cur, table, col, use_id)
+            self._create_fts5(cur, table, col, rowid_col)
 
     def create_table(self, table: str, columns: dict[str, str | Column]) -> None:
         _validate_identifier(table, "table")
@@ -142,10 +176,7 @@ class SchemaMixin:
             )
         col_defs: list[str] = []
         parsed: dict[str, str] = {}
-        has_custom_pk = any(
-            "PRIMARY KEY" in _column_spec(spec).upper() and name == "id"
-            for name, spec in columns.items()
-        )
+        has_custom_pk = any("PRIMARY KEY" in _column_spec(spec).upper() for name, spec in columns.items())
         if not has_custom_pk:
             col_defs.append("id INTEGER PRIMARY KEY AUTOINCREMENT")
 
@@ -195,9 +226,9 @@ class SchemaMixin:
                 logger.info("migrate_column_added table=%s column=%s type=%s", table, col_name, col_parsed_type)
 
             text_cols = [c for c, t in parsed.items() if t in ("TEXT", "LONGTEXT")]
-            use_id = self._has_autoincrement_id(table)
+            rowid_col = self._get_rowid_ref(table, cur=cur)
             for col in text_cols:
-                self._create_fts5(cur, table, col, use_id)
+                self._create_fts5(cur, table, col, rowid_col)
             for col in self._get_longtext_columns_from_parsed(parsed):
                 self._get_collection(f"{table}_{col}")
             self._save_table_meta(cur, table, parsed)
@@ -226,7 +257,7 @@ class SchemaMixin:
             new_columns = dict(meta["columns"])
             new_columns[column] = base_type
             if base_type in ("TEXT", "LONGTEXT"):
-                self._create_fts5(cur, table, column, self._has_autoincrement_id(table))
+                self._create_fts5(cur, table, column, self._get_rowid_ref(table, cur=cur))
             if base_type == "LONGTEXT":
                 self._get_collection(f"{table}_{column}")
             self._save_table_meta(cur, table, new_columns, dirty=(base_type == "LONGTEXT"))
@@ -242,10 +273,17 @@ class SchemaMixin:
         old_columns = {k: v for k, v in meta["columns"].items() if k != column}
 
         with self._connect() as cur:
+            pk_col = self._get_pk_column(table, cur=cur)
+            pk_ctype = old_columns.get(pk_col, "INTEGER_PK")
+            pk_base = pk_ctype.replace("_PK", "").replace("_PK", "")
+            pk_sql_type = {"LONGTEXT": "TEXT", "BOOLEAN": "INTEGER", "JSON": "TEXT"}.get(pk_base, pk_base)
             old_table = f"_{table}_old"
             cur.execute(f"ALTER TABLE {table} RENAME TO {old_table}")
-            new_col_defs = ["id INTEGER PRIMARY KEY AUTOINCREMENT"]
+            pk_extras = "PRIMARY KEY AUTOINCREMENT" if pk_sql_type == "INTEGER" else "PRIMARY KEY"
+            new_col_defs = [f"{pk_col} {pk_sql_type} {pk_extras}"]
             for cname, ctype in old_columns.items():
+                if cname == pk_col:
+                    continue
                 sqlite_type = {"LONGTEXT": "TEXT", "BOOLEAN": "INTEGER", "JSON": "TEXT"}.get(ctype, ctype)
                 new_col_defs.append(f"{cname} {sqlite_type}")
             cur.execute(f"CREATE TABLE {table} ({', '.join(new_col_defs)})")
@@ -287,7 +325,7 @@ class SchemaMixin:
             cur.execute(f"ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}")
             if col_type in ("TEXT", "LONGTEXT"):
                 self._drop_fts5(cur, table, old_name)
-                self._create_fts5(cur, table, new_name, self._has_autoincrement_id(table))
+                self._create_fts5(cur, table, new_name, self._get_rowid_ref(table, cur=cur))
             if col_type == "LONGTEXT" and self._chroma is not None:
                 try:
                     old_coll = self._get_collection(f"{table}_{old_name}")
