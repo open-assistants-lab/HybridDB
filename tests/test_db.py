@@ -832,6 +832,116 @@ class TestGraphAlgorithms:
         results = db.search_graph("gadget")
         assert isinstance(results, list)
 
+    def test_pagerank_with_personalization(self, db):
+        db.add_node("a"), db.add_node("b"), db.add_node("c"), db.add_node("d")
+        db.add_edge(None, "a", "b", weight=1.0)
+        db.add_edge(None, "b", "c", weight=1.0)
+        db.add_edge(None, "c", "a", weight=1.0)
+        db.add_edge(None, "a", "d", weight=0.5)
+        pr = db.pagerank()
+        assert "a" in pr and "d" in pr
+        ppr = db.pagerank(personalization={"c": 1.0}, alpha=0.15)
+        assert ppr["c"] > pr["c"]
+
+    def test_pagerank_alpha(self, db):
+        import statistics
+
+        db.add_node("a"), db.add_node("b"), db.add_node("c")
+        db.add_edge(None, "a", "b", weight=1.0)
+        db.add_edge(None, "b", "c", weight=1.0)
+        pr_high = db.pagerank(alpha=0.85)
+        pr_low = db.pagerank(alpha=0.15)
+        assert abs(sum(pr_high.values()) - 1.0) < 0.01
+        assert abs(sum(pr_low.values()) - 1.0) < 0.01
+        assert statistics.pstdev(pr_low.values()) < statistics.pstdev(pr_high.values())
+
+    def test_pagerank_backward_compat(self, db):
+        db.add_node("n1"), db.add_node("n2")
+        db.add_edge(None, "n1", "n2", weight=0.9)
+        pr = db.pagerank()
+        assert "n1" in pr and "n2" in pr
+
+    def test_search_graph_ppr_basic(self, db):
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        db.insert("docs", {"id": "d1", "body": "machine learning basics"})
+        db.insert("docs", {"id": "d2", "body": "deep neural networks"})
+        db.insert("docs", {"id": "d3", "body": "cooking pasta recipes"})
+        db._auto_sync_graph_nodes()
+        db.add_edge(None, "d1", "d2", type="related", weight=1.0)
+        results = db.search_graph_ppr("machine learning", hop_expansion=2)
+        assert len(results) > 0
+        node_ids = [r["node_id"] for r in results]
+        assert "d1" in node_ids
+
+    def test_search_graph_ppr_no_edges(self, db):
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        db.insert("docs", {"id": "d1", "body": "hello world"})
+        results = db.search_graph_ppr("hello", hop_expansion=2)
+        assert len(results) > 0
+        assert results[0]["node_id"] == "d1"
+
+    def test_search_graph_ppr_graph_brings_indirect_match(self, db):
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        db.insert("docs", {"id": "d1", "body": "python programming tutorial"})
+        db.insert("docs", {"id": "d2", "body": "xqz unrelated content zzz"})
+        db.insert("docs", {"id": "d3", "body": "cooking italian food"})
+        db._auto_sync_graph_nodes()
+        db.add_edge(None, "d1", "d2", type="related", weight=1.0)
+        results = db.search_graph_ppr("python", hop_expansion=2, min_similarity=0.1)
+        node_ids = [r["node_id"] for r in results]
+        assert "d1" in node_ids
+        assert "d2" in node_ids
+        assert "d3" not in node_ids
+
+    def test_search_graph_ppr_alpha(self, db):
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        db.insert("docs", {"id": "d1", "body": "topic a unique phrase"})
+        db.insert("docs", {"id": "d2", "body": "xqz intermediate zzz"})
+        db.insert("docs", {"id": "d3", "body": "xqz distant zzz far"})
+        db._auto_sync_graph_nodes()
+        db.add_edge(None, "d1", "d2", type="rel", weight=1.0)
+        db.add_edge(None, "d2", "d3", type="rel", weight=1.0)
+        results_low = db.search_graph_ppr("topic a", alpha=0.15)
+        results_high = db.search_graph_ppr("topic a", alpha=0.85)
+        assert results_low[0]["node_id"] == "d1"
+        assert results_high[0]["node_id"] == "d1"
+        low_scores = {r["node_id"]: r["ppr_score"] for r in results_low}
+        if "d2" in low_scores and "d3" in low_scores:
+            assert low_scores["d2"] > low_scores["d3"]
+        high_scores = {r["node_id"]: r["ppr_score"] for r in results_high}
+        if "d2" in high_scores and "d3" in high_scores:
+            gap_low = low_scores["d2"] - low_scores["d3"]
+            gap_high = high_scores["d2"] - high_scores["d3"]
+            assert gap_high < gap_low
+
+    def test_search_graph_ppr_k_seeds(self, db):
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        for i in range(10):
+            db.insert("docs", {"id": f"d{i}", "body": f"document number {i} about topics"})
+        db._auto_sync_graph_nodes()
+        db.add_edge(None, "d0", "d1", type="rel", weight=1.0)
+        # With k_seeds=1, only 1 seed found → subgraph has d0 + d1 (via edge)
+        results_1 = db.search_graph_ppr("document", limit=5, k_seeds=1)
+        # With k_seeds=10, more seeds → larger subgraph
+        results_10 = db.search_graph_ppr("document", limit=5, k_seeds=10)
+        # k_seeds=10 should find more nodes in the subgraph
+        assert len(results_10) >= len(results_1)
+
+    def test_sync_graph_nodes_public(self, db):
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        db.insert("docs", {"id": "d1", "body": "hello"})
+        result = db.sync_graph_nodes()
+        assert result["nodes_created"] >= 1
+        node = db.get_node("d1")
+        assert node is not None
+        assert node["type"] == "doc"
+
 
 class TestDuckDBAnalytics:
     def test_analytics(self, db):

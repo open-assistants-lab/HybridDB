@@ -580,9 +580,22 @@ class GraphMixin:
             self._nx_cache["directed"] = directed
         return g
 
-    def pagerank(self) -> dict[str, float]:
+    def sync_graph_nodes(self) -> dict:
+        """Sync registered table rows into graph nodes. Public API."""
+        return self._auto_sync_graph_nodes()
+
+    def pagerank(
+        self,
+        personalization: dict[str, float] | None = None,
+        alpha: float = 0.85,
+    ) -> dict[str, float]:
         import networkx as nx
-        return nx.pagerank(self.to_networkx(directed=True), weight="weight")
+
+        G = self.to_networkx(directed=True)
+        return nx.pagerank(
+            G, alpha=alpha, weight="weight",
+            personalization=personalization,
+        )
 
     def betweenness_centrality(self) -> dict[str, float]:
         import networkx as nx
@@ -604,7 +617,16 @@ class GraphMixin:
         partition = nx.community.louvain_communities(self.to_networkx(directed=False), weight="weight")
         return [set(c) for c in partition]
 
-    def search_graph(self, query: str, hop_expansion: int = 2, limit: int = 10) -> list[dict]:
+    def _find_seed_nodes(
+        self, query: str, limit: int = 10, min_similarity: float = 0.0,
+    ) -> dict[str, dict]:
+        """Vector search across registered graph-synced tables.
+
+        Returns:
+            {node_id: {"table": str, "similarity": float}} for matching nodes.
+            node_id is the table's primary key value, not the ChromaDB rowid.
+            Nodes with similarity below min_similarity are filtered out.
+        """
         self._auto_sync_graph_nodes()
         self._auto_sync_graph_edges()
         registered = self.raw_query("SELECT table_name FROM _graph_sync")
@@ -612,6 +634,7 @@ class GraphMixin:
         found_nodes: dict[str, dict] = {}
         embedding: list[float] | None = None
         for table in searchable_tables:
+            pk_col = self._get_pk_column(table)
             for col_name in self._get_longtext_columns(table):
                 try:
                     if embedding is None:
@@ -622,11 +645,28 @@ class GraphMixin:
                     vec_results = collection.query(
                         query_embeddings=[embedding], n_results=limit, include=["distances"],
                     )
-                    for i, doc_id in enumerate(vec_results.get("ids", [[]])[0]):
+                    chroma_ids = vec_results.get("ids", [[]])[0]
+                    if not chroma_ids:
+                        continue
+                    rowid_list = ",".join("?" for _ in chroma_ids)
+                    rows = self.raw_query(
+                        f"SELECT rowid, {pk_col} FROM {table} WHERE rowid IN ({rowid_list})",
+                        tuple(chroma_ids),
+                    )
+                    rowid_to_pk = {str(r["rowid"]): str(r[pk_col]) for r in rows}
+                    for i, doc_id in enumerate(chroma_ids):
                         distance = vec_results["distances"][0][i] if "distances" in vec_results else 0
-                        found_nodes[str(doc_id)] = {"table": table, "similarity": max(0.0, 1.0 - distance)}
+                        pk_value = rowid_to_pk.get(str(doc_id), str(doc_id))
+                        similarity = max(0.0, 1.0 - distance)
+                        if similarity < min_similarity:
+                            continue
+                        found_nodes[pk_value] = {"table": table, "similarity": similarity}
                 except Exception:
                     continue
+        return found_nodes
+
+    def search_graph(self, query: str, hop_expansion: int = 2, limit: int = 10) -> list[dict]:
+        found_nodes = self._find_seed_nodes(query, limit)
         result_list = []
         for node_id, meta in found_nodes.items():
             entry = {"node_id": node_id, "similarity": meta["similarity"], "source_table": meta["table"]}
@@ -638,4 +678,72 @@ class GraphMixin:
             result_list.append(entry)
         result_list.sort(key=lambda x: x["similarity"], reverse=True)
         return result_list[:limit]
+
+    def search_graph_ppr(
+        self,
+        query: str,
+        hop_expansion: int = 2,
+        limit: int = 10,
+        alpha: float = 0.15,
+        min_similarity: float = 0.0,
+        k_seeds: int | None = None,
+    ) -> list[dict]:
+        import networkx as nx
+
+        seed_limit = k_seeds if k_seeds is not None else limit
+        seed_nodes = self._find_seed_nodes(query, seed_limit, min_similarity=min_similarity)
+        if not seed_nodes:
+            return []
+
+        subgraph_node_ids: set[str] = set(seed_nodes.keys())
+        node_depth: dict[str, int] = {nid: 0 for nid in seed_nodes}
+
+        if hop_expansion > 0:
+            for node_id in seed_nodes:
+                try:
+                    neighbors = self.traverse(
+                        node_id, max_depth=hop_expansion, direction="both"
+                    )
+                except Exception:
+                    neighbors = []
+                for n in neighbors:
+                    nid = n.get("node_id", "")
+                    if not nid:
+                        continue
+                    subgraph_node_ids.add(nid)
+                    depth = n.get("depth", hop_expansion)
+                    if nid not in node_depth or depth < node_depth[nid]:
+                        node_depth[nid] = depth
+
+        G_full = self.to_networkx(directed=True)
+        G_sub = G_full.subgraph(subgraph_node_ids).copy()
+
+        if len(G_sub) == 0:
+            return []
+
+        personalization = {
+            nid: max(meta["similarity"], 1e-6)
+            for nid, meta in seed_nodes.items()
+            if nid in G_sub
+        }
+        if not personalization:
+            personalization = None
+
+        scores = nx.pagerank(
+            G_sub, alpha=alpha, weight="weight",
+            personalization=personalization,
+        )
+
+        results = [
+            {
+                "node_id": nid,
+                "ppr_score": score,
+                "similarity": seed_nodes.get(nid, {}).get("similarity", 0.0),
+                "source_table": seed_nodes.get(nid, {}).get("table", ""),
+                "depth": node_depth.get(nid, hop_expansion),
+            }
+            for nid, score in scores.items()
+        ]
+        results.sort(key=lambda x: x["ppr_score"], reverse=True)
+        return results[:limit]
 

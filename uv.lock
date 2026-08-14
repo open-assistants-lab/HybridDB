@@ -624,7 +624,7 @@ wheels = [
 
 [[package]]
 name = "hybriddb"
-version = "0.4.4"
+version = "0.5.3"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
@@ -634,6 +634,7 @@ dependencies = [
 all = [
     { name = "duckdb" },
     { name = "networkx" },
+    { name = "scipy" },
 ]
 analytics = [
     { name = "duckdb" },
@@ -649,9 +650,11 @@ dev = [
     { name = "networkx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "scipy" },
 ]
 graph = [
     { name = "networkx" },
+    { name = "scipy" },
 ]
 sentence-transformers = [
     { name = "sentence-transformers" },
@@ -670,6 +673,8 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "pytest-benchmark", marker = "extra == 'benchmark'", specifier = ">=4.0.0" },
     { name = "pytest-timeout", marker = "extra == 'benchmark'", specifier = ">=2.3.0" },
+    { name = "scipy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "scipy", marker = "extra == 'graph'", specifier = ">=1.10,<2.0" },
     { name = "sentence-transformers", marker = "extra == 'benchmark'", specifier = ">=3.0.0" },
     { name = "sentence-transformers", marker = "extra == 'sentence-transformers'", specifier = ">=3.0.0,<6.0" },
 ]

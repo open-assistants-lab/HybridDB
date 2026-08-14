@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.3] — 2026-07-31
+
+### Added
+- `search_graph_ppr(k_seeds)` — separate control over number of seed nodes from vector search vs. number of final results. `k_seeds=None` (default) uses `limit` for both, preserving backward compatibility. Pass `k_seeds=20` with `limit=5` to spread from 20 seeds but return top-5.
+- `sync_graph_nodes()` — public API wrapper for `_auto_sync_graph_nodes()`. Syncs registered table rows into graph nodes without requiring callers to use a private method.
+
+## [0.5.2] — 2026-07-31
+
+### Fixed
+- Added `scipy` to the `graph` optional dependency. NetworkX's `pagerank` requires scipy at runtime but it wasn't listed.
+
+## [0.5.1] — 2026-07-31
+
+### Fixed
+- `search_graph_ppr` default `min_similarity` changed from 0.1 to 0.0. The ChromaDB default embedding model (MiniLM) produces cosine distances around 1.0 for short texts, yielding `1.0 - distance ≈ 0`. A 0.1 threshold filtered out all seeds, returning empty results. Callers who need filtering should pass `min_similarity` explicitly.
+- Added `scipy` to the `graph` optional dependency. NetworkX's `pagerank` requires scipy at runtime but it wasn't listed as a dependency.
+
+## [0.5.0] — 2026-07-31
+
+### Added
+- `pagerank(personalization, alpha)` — Personalized PageRank support. The `personalization` dict biases the random walk toward seed nodes (query-relevant importance instead of global importance). `alpha` controls damping (lower = more concentrated near seeds). Backward compatible — `pagerank()` with no args returns standard PageRank as before.
+- `search_graph_ppr(query, hop_expansion, limit, alpha, min_similarity)` — Graph-aware semantic retrieval via Personalized PageRank. Pipeline: vector search → filter by `min_similarity` → expand subgraph via `traverse()` → PPR on subgraph with seeds as personalization → return ranked by PPR score. Finds nodes that are semantically relevant AND structurally close to seeds.
+- `_find_seed_nodes(query, limit, min_similarity)` — Extracted shared seed-finding helper used by both `search_graph` and `search_graph_ppr`. Fixed latent bug: ChromaDB returns rowids, not the table's primary key column values. Now maps rowids back to the actual PK via SQL lookup.
+
+### Fixed
+- `search_graph` and `_find_seed_nodes` now return the table's primary key value as `node_id` instead of the ChromaDB rowid. Previously, `search_graph` returned rowids which didn't match graph node IDs when tables use a custom-named `TEXT PRIMARY KEY` column.
+
 ## [0.4.5] — 2026-06-15
 
 ### Fixed
