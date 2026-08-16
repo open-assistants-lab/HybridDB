@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.4] — 2026-08-15
+
+### Fixed
+- `search_graph` and `search_graph_ppr` returned `[]` for tables using the default `id INTEGER PRIMARY KEY AUTOINCREMENT`. `_find_seed_nodes` ran `SELECT rowid, id`, but SQLite names both result columns `id` when the PK is the rowid alias, so `dict(row)` dropped `rowid` and the rowid→PK mapping raised `KeyError`, which was silently swallowed — zero seeds, empty results. Now aliases the rowid (`SELECT rowid AS _rid`) so the mapping works for every PK type. (#bug)
+
 ## [0.5.3] — 2026-07-31
 
 ### Added

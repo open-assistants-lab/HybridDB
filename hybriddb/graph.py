@@ -650,10 +650,10 @@ class GraphMixin:
                         continue
                     rowid_list = ",".join("?" for _ in chroma_ids)
                     rows = self.raw_query(
-                        f"SELECT rowid, {pk_col} FROM {table} WHERE rowid IN ({rowid_list})",
+                        f"SELECT rowid AS _rid, {pk_col} FROM {table} WHERE rowid IN ({rowid_list})",
                         tuple(chroma_ids),
                     )
-                    rowid_to_pk = {str(r["rowid"]): str(r[pk_col]) for r in rows}
+                    rowid_to_pk = {str(r["_rid"]): str(r[pk_col]) for r in rows}
                     for i, doc_id in enumerate(chroma_ids):
                         distance = vec_results["distances"][0][i] if "distances" in vec_results else 0
                         pk_value = rowid_to_pk.get(str(doc_id), str(doc_id))

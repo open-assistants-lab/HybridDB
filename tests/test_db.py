@@ -832,6 +832,31 @@ class TestGraphAlgorithms:
         results = db.search_graph("gadget")
         assert isinstance(results, list)
 
+    def test_search_graph_default_integer_pk(self, db):
+        """Default auto-increment id (INTEGER PRIMARY KEY) must work.
+
+        Regression: `SELECT rowid, id` collapses both columns to 'id' when the
+        PK is the rowid alias, so the rowid->PK mapping silently dropped every
+        seed and search_graph returned [].
+        """
+        db.create_table("docs", {"body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        db.insert("docs", {"body": "machine learning basics"})
+        db.insert("docs", {"body": "cooking pasta recipes"})
+        results = db.search_graph("machine learning", limit=5)
+        assert len(results) > 0
+        assert results[0]["node_id"] == "1"
+
+    def test_search_graph_ppr_default_integer_pk(self, db):
+        """Default auto-increment id must work for Personalized PageRank."""
+        db.create_table("docs", {"body": "LONGTEXT"})
+        db.register_entity_node("docs", type="doc")
+        db.insert("docs", {"body": "machine learning basics"})
+        db.insert("docs", {"body": "cooking pasta recipes"})
+        results = db.search_graph_ppr("machine learning", hop_expansion=2)
+        assert len(results) > 0
+        assert results[0]["node_id"] == "1"
+
     def test_pagerank_with_personalization(self, db):
         db.add_node("a"), db.add_node("b"), db.add_node("c"), db.add_node("d")
         db.add_edge(None, "a", "b", weight=1.0)
