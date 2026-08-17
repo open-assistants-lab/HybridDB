@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import struct
@@ -34,6 +35,17 @@ from hybriddb.utils import (
 )
 
 logger = logging.getLogger("hybriddb")
+
+
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+def _render_label_template(template: str, row: dict) -> str:
+    """Substitute {column} placeholders in a label template with row values."""
+    def _sub(match: re.Match) -> str:
+        return str(row.get(match.group(1), ""))
+    return _TEMPLATE_PLACEHOLDER_RE.sub(_sub, template)
+
 
 class GraphMixin:
     def _init_graph_tables(self) -> None:
@@ -163,7 +175,7 @@ class GraphMixin:
         return True
 
     def _auto_sync_graph_nodes(self) -> dict:
-        result = {"nodes_created": 0}
+        result = {"nodes_created": 0, "nodes_updated": 0, "nodes_removed": 0}
         rules = self.raw_query("SELECT * FROM _graph_sync")
         for rule in rules:
             table = rule["table_name"]
@@ -174,15 +186,33 @@ class GraphMixin:
                 continue
             tmpl = rule["label_template"]
             ntype = rule["node_type"]
-            rows = self.raw_query(f"SELECT {id_col} FROM {table}")
+            rows = self.raw_query(f"SELECT * FROM {table}")
+            current_ids: set[str] = set()
             for row in rows:
                 rid = str(row[id_col])
-                label = tmpl.replace(f"{{{id_col}}}", rid)
-                existing = self.get_node(rid)
-                if existing and existing.get("type") == ntype:
-                    continue
-                self.add_node(rid, label=label, type=ntype, source="auto_sync")
-                result["nodes_created"] += 1
+                node_id = f"{table}:{rid}"
+                current_ids.add(node_id)
+                label = _render_label_template(tmpl, row)
+                existing = self.get_node(node_id)
+                if existing:
+                    if (existing.get("type") == ntype
+                            and existing.get("label") == label
+                            and existing.get("source") == "auto_sync"):
+                        continue
+                    self.update_node(node_id, {"label": label, "type": ntype, "source": "auto_sync"})
+                    result["nodes_updated"] += 1
+                else:
+                    self.add_node(node_id, label=label, type=ntype, source="auto_sync")
+                    result["nodes_created"] += 1
+            escaped = table.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            ghosts = self.raw_query(
+                "SELECT id FROM _graph_nodes WHERE source = 'auto_sync' AND id LIKE ? ESCAPE '\\'",
+                (f"{escaped}:%",),
+            )
+            for g in ghosts:
+                if g["id"] not in current_ids:
+                    self.delete_node(g["id"])
+                    result["nodes_removed"] += 1
         return result
 
     def _auto_sync_graph_edges(self) -> dict:
@@ -191,18 +221,29 @@ class GraphMixin:
         for rule in rules:
             src_table = rule["source_table"]
             tgt_table = rule["target_table"]
-            src_col = rule.get("source_column") or rule["target_match"]
-            tgt_col = rule.get("target_column") or rule["target_match"]
+            if rule.get("source_column") is not None:
+                src_col = rule["source_column"]
+                tgt_col = rule["target_column"]
+            else:
+                src_col = rule["target_match"]
+                tgt_col = rule["target_column"] or self._get_pk_column(tgt_table)
+            actual_pk = self._get_pk_column(tgt_table)
+            if tgt_col == "id" and actual_pk != "id":
+                tgt_col = actual_pk
             if (not _is_safe_identifier(src_table) or not _is_safe_identifier(tgt_table)
                     or not _is_safe_identifier(src_col) or not _is_safe_identifier(tgt_col)):
                 continue
             etype = rule["edge_type"]
+            src_pk = self._get_pk_column(src_table)
+            tgt_pk = self._get_pk_column(tgt_table)
             pairs = self.raw_query(
-                f"SELECT s.id as sid, t.id as tid FROM {src_table} s "
+                f"SELECT s.{src_pk} as sid, t.{tgt_pk} as tid FROM {src_table} s "
                 f"JOIN {tgt_table} t ON s.{src_col} = t.{tgt_col}"
             )
             for pair in pairs:
-                self.add_edge(None, str(pair["sid"]), str(pair["tid"]), type=etype)
+                sid = f"{src_table}:{pair['sid']}"
+                tid = f"{tgt_table}:{pair['tid']}"
+                self.add_edge(None, sid, tid, type=etype)
                 result["edges_created"] += 1
         return result
 
@@ -485,7 +526,7 @@ class GraphMixin:
         type_filter = ""
         if type:
             type_filter = " AND e.type = ?"
-            base_params = base_params + (type,)
+            base_params = (start_id, start_id, type, start_id)
 
         sql = f"""
             WITH RECURSIVE graph_path(node_id, depth, path, cum_cost) AS (
@@ -660,8 +701,9 @@ class GraphMixin:
                         similarity = max(0.0, 1.0 - distance)
                         if similarity < min_similarity:
                             continue
-                        found_nodes[pk_value] = {"table": table, "similarity": similarity}
+                        found_nodes[f"{table}:{pk_value}"] = {"table": table, "similarity": similarity}
                 except Exception:
+                    logger.debug("graph.seed_search_failed", exc_info=True)
                     continue
         return found_nodes
 
@@ -715,7 +757,7 @@ class GraphMixin:
                     if nid not in node_depth or depth < node_depth[nid]:
                         node_depth[nid] = depth
 
-        G_full = self.to_networkx(directed=True)
+        G_full = self.to_networkx(directed=False)
         G_sub = G_full.subgraph(subgraph_node_ids).copy()
 
         if len(G_sub) == 0:

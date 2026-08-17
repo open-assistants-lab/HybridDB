@@ -845,7 +845,7 @@ class TestGraphAlgorithms:
         db.insert("docs", {"body": "cooking pasta recipes"})
         results = db.search_graph("machine learning", limit=5)
         assert len(results) > 0
-        assert results[0]["node_id"] == "1"
+        assert results[0]["node_id"] == "docs:1"
 
     def test_search_graph_ppr_default_integer_pk(self, db):
         """Default auto-increment id must work for Personalized PageRank."""
@@ -855,7 +855,7 @@ class TestGraphAlgorithms:
         db.insert("docs", {"body": "cooking pasta recipes"})
         results = db.search_graph_ppr("machine learning", hop_expansion=2)
         assert len(results) > 0
-        assert results[0]["node_id"] == "1"
+        assert results[0]["node_id"] == "docs:1"
 
     def test_pagerank_with_personalization(self, db):
         db.add_node("a"), db.add_node("b"), db.add_node("c"), db.add_node("d")
@@ -893,11 +893,11 @@ class TestGraphAlgorithms:
         db.insert("docs", {"id": "d2", "body": "deep neural networks"})
         db.insert("docs", {"id": "d3", "body": "cooking pasta recipes"})
         db._auto_sync_graph_nodes()
-        db.add_edge(None, "d1", "d2", type="related", weight=1.0)
+        db.add_edge(None, "docs:d1", "docs:d2", type="related", weight=1.0)
         results = db.search_graph_ppr("machine learning", hop_expansion=2)
         assert len(results) > 0
         node_ids = [r["node_id"] for r in results]
-        assert "d1" in node_ids
+        assert "docs:d1" in node_ids
 
     def test_search_graph_ppr_no_edges(self, db):
         db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
@@ -905,7 +905,7 @@ class TestGraphAlgorithms:
         db.insert("docs", {"id": "d1", "body": "hello world"})
         results = db.search_graph_ppr("hello", hop_expansion=2)
         assert len(results) > 0
-        assert results[0]["node_id"] == "d1"
+        assert results[0]["node_id"] == "docs:d1"
 
     def test_search_graph_ppr_graph_brings_indirect_match(self, db):
         db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
@@ -914,12 +914,12 @@ class TestGraphAlgorithms:
         db.insert("docs", {"id": "d2", "body": "xqz unrelated content zzz"})
         db.insert("docs", {"id": "d3", "body": "cooking italian food"})
         db._auto_sync_graph_nodes()
-        db.add_edge(None, "d1", "d2", type="related", weight=1.0)
+        db.add_edge(None, "docs:d1", "docs:d2", type="related", weight=1.0)
         results = db.search_graph_ppr("python", hop_expansion=2, min_similarity=0.1)
         node_ids = [r["node_id"] for r in results]
-        assert "d1" in node_ids
-        assert "d2" in node_ids
-        assert "d3" not in node_ids
+        assert "docs:d1" in node_ids
+        assert "docs:d2" in node_ids
+        assert "docs:d3" not in node_ids
 
     def test_search_graph_ppr_alpha(self, db):
         db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
@@ -928,20 +928,15 @@ class TestGraphAlgorithms:
         db.insert("docs", {"id": "d2", "body": "xqz intermediate zzz"})
         db.insert("docs", {"id": "d3", "body": "xqz distant zzz far"})
         db._auto_sync_graph_nodes()
-        db.add_edge(None, "d1", "d2", type="rel", weight=1.0)
-        db.add_edge(None, "d2", "d3", type="rel", weight=1.0)
+        db.add_edge(None, "docs:d1", "docs:d2", type="rel", weight=1.0)
+        db.add_edge(None, "docs:d2", "docs:d3", type="rel", weight=1.0)
         results_low = db.search_graph_ppr("topic a", alpha=0.15)
         results_high = db.search_graph_ppr("topic a", alpha=0.85)
-        assert results_low[0]["node_id"] == "d1"
-        assert results_high[0]["node_id"] == "d1"
+        assert results_low[0]["node_id"] == "docs:d1"
         low_scores = {r["node_id"]: r["ppr_score"] for r in results_low}
-        if "d2" in low_scores and "d3" in low_scores:
-            assert low_scores["d2"] > low_scores["d3"]
         high_scores = {r["node_id"]: r["ppr_score"] for r in results_high}
-        if "d2" in high_scores and "d3" in high_scores:
-            gap_low = low_scores["d2"] - low_scores["d3"]
-            gap_high = high_scores["d2"] - high_scores["d3"]
-            assert gap_high < gap_low
+        assert low_scores["docs:d1"] > high_scores["docs:d1"]
+        assert high_scores["docs:d2"] > low_scores["docs:d2"]
 
     def test_search_graph_ppr_k_seeds(self, db):
         db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": "LONGTEXT"})
@@ -949,7 +944,7 @@ class TestGraphAlgorithms:
         for i in range(10):
             db.insert("docs", {"id": f"d{i}", "body": f"document number {i} about topics"})
         db._auto_sync_graph_nodes()
-        db.add_edge(None, "d0", "d1", type="rel", weight=1.0)
+        db.add_edge(None, "docs:d0", "docs:d1", type="rel", weight=1.0)
         # With k_seeds=1, only 1 seed found → subgraph has d0 + d1 (via edge)
         results_1 = db.search_graph_ppr("document", limit=5, k_seeds=1)
         # With k_seeds=10, more seeds → larger subgraph
@@ -963,9 +958,91 @@ class TestGraphAlgorithms:
         db.insert("docs", {"id": "d1", "body": "hello"})
         result = db.sync_graph_nodes()
         assert result["nodes_created"] >= 1
-        node = db.get_node("d1")
+        node = db.get_node("docs:d1")
         assert node is not None
         assert node["type"] == "doc"
+
+    def test_traverse_type_filter(self, db):
+        for nid, typ in (("a", "person"), ("b", "person"), ("c", "company")):
+            db.add_node(nid, type=typ)
+        db.add_edge(None, "a", "b", type="knows", weight=0.9)
+        db.add_edge(None, "b", "c", type="works_at", weight=0.8)
+        typed = db.traverse("a", max_depth=2, direction="out", type="knows")
+        ids = [n["node_id"] for n in typed]
+        assert ids == ["b"]
+        assert "a" not in ids
+
+    def test_auto_sync_nodes_no_cross_table_collision(self, db):
+        db.create_table("items", {"name": "TEXT"})
+        db.create_table("orders", {"note": "TEXT"})
+        db.register_entity_node("items", type="item")
+        db.register_entity_node("orders", type="order")
+        db.insert("items", {"name": "widget"})
+        db.insert("orders", {"note": "order one"})
+        db._auto_sync_graph_nodes()
+        nodes = {n["id"]: n["type"] for n in db.list_nodes()}
+        assert nodes == {"items:1": "item", "orders:1": "order"}
+
+    def test_auto_sync_edges_custom_pk(self, db):
+        db.create_table("items", {"uid": "TEXT PRIMARY KEY", "name": "LONGTEXT", "parent": "TEXT"})
+        db.register_entity_node("items", id_column="uid")
+        db.register_edge_rule("items", "items", target_match="parent")
+        db.insert("items", {"uid": "a1", "name": "gadget", "parent": ""})
+        db.insert("items", {"uid": "a2", "name": "widget", "parent": "a1"})
+        db._auto_sync_graph_nodes()
+        db._auto_sync_graph_edges()
+        edges = db.graph.get_edges()
+        assert len(edges) == 1
+        assert edges[0]["source_id"] == "items:a2"
+        assert edges[0]["target_id"] == "items:a1"
+
+    def test_auto_sync_edges_custom_pk_fk_columns(self, db):
+        db.create_table("customers", {"uid": "TEXT PRIMARY KEY", "name": "TEXT"})
+        db.create_table("orders", {"oid": "TEXT PRIMARY KEY", "customer_id": "TEXT", "total": "TEXT"})
+        db.register_entity_node("customers", id_column="uid")
+        db.register_entity_node("orders", id_column="oid")
+        db.register_edge_rule("orders", "customers", source_column="customer_id", target_column="uid")
+        db.insert("customers", {"uid": "c1", "name": "acme"})
+        db.insert("orders", {"oid": "o1", "customer_id": "c1", "total": "100"})
+        db._auto_sync_graph_nodes()
+        db._auto_sync_graph_edges()
+        edges = db.graph.get_edges()
+        assert len(edges) == 1
+        assert edges[0]["source_id"] == "orders:o1"
+        assert edges[0]["target_id"] == "customers:c1"
+
+    def test_auto_sync_removes_ghost_nodes(self, db):
+        db.create_table("docs", {"body": "LONGTEXT"})
+        db.register_entity_node("docs")
+        db.insert("docs", {"body": "keep me"})
+        db.insert("docs", {"body": "delete me"})
+        db._auto_sync_graph_nodes()
+        assert db.get_node("docs:2") is not None
+        db.delete("docs", 2)
+        db._auto_sync_graph_nodes()
+        assert db.get_node("docs:2") is None
+        assert db.get_node("docs:1") is not None
+
+    def test_auto_sync_label_template_columns(self, db):
+        db.create_table("docs", {"title": "TEXT", "body": "LONGTEXT"})
+        db.register_entity_node("docs", label_template="docs: {title}")
+        db.insert("docs", {"title": "Old title", "body": "x"})
+        db._auto_sync_graph_nodes()
+        assert db.get_node("docs:1")["label"] == "docs: Old title"
+        db.update("docs", 1, {"title": "New title"})
+        db._auto_sync_graph_nodes()
+        assert db.get_node("docs:1")["label"] == "docs: New title"
+
+    def test_search_graph_ppr_spreads_through_auto_synced_edges(self, db):
+        db.create_table("docs", {"body": "LONGTEXT", "parent_id": "TEXT"})
+        db.register_entity_node("docs")
+        db.register_edge_rule("docs", "docs", target_match="parent_id")
+        db.insert("docs", {"body": "refresh token failed during sync", "parent_id": ""})
+        db.insert("docs", {"body": "root cause analysis of the failure", "parent_id": "1"})
+        results = db.search_graph_ppr("oauth refresh failure", k_seeds=8)
+        by_id = {r["node_id"]: r["ppr_score"] for r in results}
+        assert "docs:1" in by_id and "docs:2" in by_id
+        assert by_id["docs:2"] > 0.05
 
 
 class TestDuckDBAnalytics:

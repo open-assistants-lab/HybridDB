@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.5] — 2026-08-16
+
+### Breaking
+- Synced graph node IDs are now namespaced by table: `{table}:{pk}` (e.g. `docs:1`, `items:a1`). Previously two registered tables with the same primary key values silently overwrote each other's nodes. `search_graph` / `search_graph_ppr` now return namespaced `node_id` values, and manual edges between synced nodes must use them. (#bug)
+
+### Added
+- `_auto_sync_graph_nodes()` now renders every `{column}` placeholder in label templates from the row (previously only the id column was substituted, leaving labels like `docs: {title}` as literal text) and refreshes labels on re-sync when rows change. (#bug)
+- `_auto_sync_graph_nodes()` now removes ghost nodes — auto-synced nodes whose table row was deleted — instead of accumulating them forever. Result dict gains `nodes_updated` and `nodes_removed`. (#bug)
+
+### Fixed
+- `search_graph_ppr` now runs PageRank on the undirected subgraph, consistent with its `direction="both"` traversal. Directed PageRank flowed seed mass away from connected nodes, so auto-synced edges (child→parent) gave connected documents ~0 score and the "graph brings indirect match" behavior silently did nothing. (#bug)
+- `_auto_sync_graph_edges` no longer hardcodes `s.id`/`t.id`. It uses each table's actual primary key column, so edge rules work with custom PK names (e.g. `uid TEXT PRIMARY KEY`) instead of raising `no such column`. The target column defaults to the target table's real PK, not the literal `id`. (#bug)
+- `traverse()` with a `type` filter bound parameters in the wrong order (the type value landed in the final `WHERE node_id != ?`), returning the start node instead of typed neighbors. (#bug)
+- `_find_seed_nodes` now logs swallowed per-collection search exceptions at debug level instead of failing silently (this is how the 0.5.4 rowid bug hid).
+
 ## [0.5.4] — 2026-08-15
 
 ### Fixed
