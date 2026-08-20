@@ -6,7 +6,6 @@ from typing import Any
 
 from hybriddb.types import Column, SearchMode
 
-
 _SYSTEM_TABLES = {
     "_journal", "_schema", "_graph_nodes", "_graph_edges",
     "_graph_sync", "_edge_rules",

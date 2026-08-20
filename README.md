@@ -16,7 +16,7 @@ db.insert("docs", {"title": "Getting Started", "body": "A guide to using HybridD
 db.insert("docs", {"title": "API Reference", "body": "Full API documentation..."})
 
 # Search every text column
-db.search("docs", "getting started")
+search_all = db.search_all("docs", "getting started")
 
 # Search one column
 db.search("docs", "body", "how do I begin", mode="hybrid")
@@ -97,7 +97,7 @@ db.search("docs", "body", "getting started guide", mode=SearchMode.HYBRID)
 db.search("docs", "body", "getting started guide", mode=HYBRID)
 
 # Search across ALL text columns at once
-db.search("contacts", "engineering manager")
+db.search_all("contacts", "engineering manager")
 db.search_columns("contacts", "engineering manager")
 ```
 
@@ -126,7 +126,7 @@ with db.cursor() as cur:
 Graph and OLAP helpers remain available on `HybridDB`, with namespaced facades for discovery:
 
 ```python
-node_id = db.graph.add_node("Alice", type="person")
+node_id = db.graph.add_node(label="Alice", type="person")
 rows = db.olap.query("SELECT COUNT(*) AS total FROM messages")
 ```
 

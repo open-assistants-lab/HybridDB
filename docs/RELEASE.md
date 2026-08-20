@@ -16,8 +16,8 @@ Expected current results:
 
 ```text
 ruff: All checks passed
-pytest: 105 passed, 23 skipped
-benchmark smoke: 23 passed
+pytest: 180 passed, 28 skipped
+benchmark smoke: 28 passed
 ```
 
 ## Build
@@ -27,11 +27,11 @@ rm -rf dist
 uv build
 ```
 
-Expected files for version `0.3.0`:
+Expected files for version `0.5.6`:
 
 ```text
-dist/hybriddb-0.3.0.tar.gz
-dist/hybriddb-0.3.0-py3-none-any.whl
+dist/hybriddb-0.5.6.tar.gz
+dist/hybriddb-0.5.6-py3-none-any.whl
 ```
 
 ## Wheel Smoke Test
@@ -40,7 +40,7 @@ Run an isolated install test from outside the repo:
 
 ```bash
 uv run --no-project --isolated --no-cache \
-  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.3.0-py3-none-any.whl \
+  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.5.6-py3-none-any.whl \
   --with duckdb \
   python - <<'PY'
 import asyncio
@@ -97,7 +97,7 @@ Or configure trusted publishing in PyPI and run the same command from the truste
 After PyPI release:
 
 ```bash
-uv run --no-project --isolated --no-cache --with hybriddb==0.3.0 python - <<'PY'
+uv run --no-project --isolated --no-cache --with hybriddb==0.5.6 python - <<'PY'
 from tempfile import TemporaryDirectory
 from hybriddb import HybridDB, LONGTEXT
 
@@ -105,7 +105,7 @@ with TemporaryDirectory() as tmp:
     db = HybridDB(tmp)
     db.create_table('docs', {'body': LONGTEXT})
     db.insert('docs', {'body': 'hello memory'})
-    assert db.search('docs', 'memory')
+    assert db.search('docs', 'body', 'memory')
     print('pypi smoke ok')
 PY
 ```

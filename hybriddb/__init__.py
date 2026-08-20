@@ -7,8 +7,8 @@ Analytics: DuckDB columnar store synced via unified journal for fast OLAP querie
 
 __version__ = "0.5.6"
 
-from hybriddb.embedding import default_embedding_fn
 from hybriddb.db import HybridDB
+from hybriddb.embedding import default_embedding_fn
 from hybriddb.types import (
     BOOLEAN,
     HYBRID,
@@ -25,7 +25,18 @@ from hybriddb.types import (
 )
 
 __all__ = [
-    "HybridDB", "SearchMode", "EmbeddingModelError", "Column", "default_embedding_fn",
-    "TEXT", "LONGTEXT", "INTEGER", "REAL", "BOOLEAN", "JSON",
-    "KEYWORD", "SEMANTIC", "HYBRID",
+    "BOOLEAN",
+    "HYBRID",
+    "INTEGER",
+    "JSON",
+    "KEYWORD",
+    "LONGTEXT",
+    "REAL",
+    "SEMANTIC",
+    "TEXT",
+    "Column",
+    "EmbeddingModelError",
+    "HybridDB",
+    "SearchMode",
+    "default_embedding_fn",
 ]

@@ -71,3 +71,9 @@ markers = [
     "analytics: tests for DuckDB analytics (requires duckdb)",
     "benchmark: performance benchmarks skipped unless --run-benchmarks is passed",
 ]
+
+[tool.ruff.lint]
+# Pyflakes rules: unused imports, undefined names, etc. The codebase
+# deliberately uses broad exception handling in defensive paths, so the
+# style rules (BLE/S110) are not enabled.
+select = ["F"]

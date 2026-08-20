@@ -6,21 +6,21 @@ import shutil
 import sqlite3
 import struct
 import tempfile
-
-import chromadb
-from chromadb.config import Settings as ChromaSettings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import chromadb
+from chromadb.config import Settings as ChromaSettings
+
 from hybriddb.embedding import EMBEDDING_DIM
 from hybriddb.utils import (
-    CHROMA_BATCH,
+    _CHROMA_HNSW_DATA_OVERHEAD,
     _CHROMA_INDEX_MAX_ELEMENTS,
     _CHROMA_INDEX_MAX_M0,
-    _CHROMA_HNSW_DATA_OVERHEAD,
     _CHROMA_INDEX_WARN_FACTOR,
     _CHROMA_REBUILD_BATCH,
+    CHROMA_BATCH,
     _validate_identifier,
 )
 

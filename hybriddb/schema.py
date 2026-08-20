@@ -2,35 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import sqlite3
-import struct
-import tempfile
-import uuid
-from collections import defaultdict
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from hybriddb.embedding import EMBEDDING_DIM
-from hybriddb.types import Column, SearchMode
+from hybriddb.types import Column
 from hybriddb.utils import (
-    CHROMA_BATCH,
-    JOURNAL_CAP,
-    RRF_K,
-    _CHROMA_INDEX_MAX_ELEMENTS,
-    _CHROMA_INDEX_MAX_M0,
-    _CHROMA_INDEX_WARN_FACTOR,
-    _CHROMA_REBUILD_BATCH,
-    _SKIP_SEARCH_COLUMNS,
     _SYSTEM_TABLES,
-    _coerce_search_mode,
     _column_spec,
-    _is_safe_identifier,
     _now_iso,
-    _sanitize_fts_query,
     _validate_identifier,
-    _validate_order_by,
 )
 
 logger = logging.getLogger("hybriddb")

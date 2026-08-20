@@ -7,7 +7,6 @@ import pytest
 
 from .helpers import SearchMode, compute_recall, generate_docs
 
-
 pytest.importorskip("sentence_transformers")
 
 TEXT_COLUMNS = [{"name": "content", "type": "TEXT"}]
@@ -237,6 +236,7 @@ def test_recall_at_k_sweep(recall_db):
 def test_cold_start_search(benchmark, db, scale, tmp_path, embedding_fn):
     """Time to first search on a fresh HybridDB instance with existing data."""
     import shutil
+
     from hybriddb import HybridDB
 
     docs = generate_docs(scale.n_docs, LONGTEXT_COLUMNS)

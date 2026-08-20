@@ -4,7 +4,6 @@ import hashlib
 import threading
 from typing import Any
 
-
 EMBEDDING_DIM = 384
 
 _default_ef: Any | None = None

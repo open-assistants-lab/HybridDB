@@ -7,19 +7,12 @@ Analytics: DuckDB columnar store synced via unified journal for fast OLAP querie
 All backed by an operation journal that guarantees consistency across all engines.
 """
 
-import json
 import logging
 import os
-import shutil
 import sqlite3
-import struct
-import tempfile
 import threading
-import uuid
-from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,10 +23,7 @@ from hybriddb.analytics import AnalyticsMixin
 from hybriddb.async_api import AsyncMixin
 from hybriddb.crud import CrudMixin
 from hybriddb.embedding import (
-    EMBEDDING_DIM,
-    default_embedding_fn,
     default_embedding_fn as _default_embedding_fn,
-    hash_embedding as _hash_embedding,
 )
 from hybriddb.export_import import ExportImportMixin
 from hybriddb.facades import AnalyticsAPI, GraphAPI
@@ -43,28 +33,7 @@ from hybriddb.maintenance import MaintenanceMixin
 from hybriddb.schema import SchemaMixin
 from hybriddb.search import SearchMixin
 from hybriddb.types import (
-    BOOLEAN,
-    HYBRID,
-    INTEGER,
-    JSON,
-    KEYWORD,
-    LONGTEXT,
-    REAL,
-    SEMANTIC,
-    TEXT,
-    Column,
     EmbeddingModelError,
-    SearchMode,
-)
-from hybriddb.utils import (
-    _SYSTEM_TABLES,
-    _coerce_search_mode,
-    _column_spec,
-    _is_safe_identifier,
-    _now_iso,
-    _sanitize_fts_query,
-    _validate_identifier,
-    _validate_order_by,
 )
 
 logger = logging.getLogger("hybriddb")

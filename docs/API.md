@@ -135,7 +135,7 @@ db.search("docs", "body", "how do I get started?")
 Search every searchable text column:
 
 ```python
-db.search("docs", "getting started")
+db.search_all("docs", "getting started")
 db.search_columns("docs", "getting started")
 ```
 
@@ -228,6 +228,10 @@ db.graph.add_edge(None, alice, bob, edge_type="knows", weight=0.9)
 neighbors = db.graph.get_neighbors(alice)
 path = db.graph.shortest_path(alice, bob)
 scores = db.graph.pagerank()
+# semantic graph retrieval: vector-search seeds, then expand via PageRank
+ppr = db.graph.search_graph_ppr("memory", hop_expansion=2, limit=5)
+# re-sync registered table rows into graph nodes
+synced = db.graph.sync_graph_nodes()
 ```
 
 The namespaced `db.graph` facade exists for discoverability. Direct methods such as `db.add_node()` and `db.shortest_path()` remain supported.

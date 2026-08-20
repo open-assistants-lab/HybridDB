@@ -13,7 +13,7 @@ uv run python -m pytest -q
 Expected shape:
 
 ```text
-105 passed, 23 skipped
+180 passed, 28 skipped
 ```
 
 The skipped tests are benchmark tests under `tests/benchmarks/`.
@@ -29,7 +29,7 @@ uv run python -m pytest tests/benchmarks -q --run-benchmarks --benchmark-disable
 Expected shape:
 
 ```text
-23 passed
+28 passed
 ```
 
 Smoke scale is intentionally small:

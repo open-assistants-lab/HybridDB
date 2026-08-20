@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hybriddb import HYBRID, KEYWORD, LONGTEXT, TEXT, HybridDB, SearchMode
+from hybriddb import HybridDB, SearchMode
 
 EMBEDDING_DIM = 384
 

@@ -8,8 +8,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from hybriddb import HYBRID, KEYWORD, LONGTEXT, TEXT, Column, EmbeddingModelError, HybridDB, SearchMode
-from hybriddb.db import _sanitize_fts_query
+from hybriddb import (
+    HYBRID,
+    KEYWORD,
+    LONGTEXT,
+    TEXT,
+    Column,
+    EmbeddingModelError,
+    HybridDB,
+    SearchMode,
+)
+from hybriddb.utils import _sanitize_fts_query
 
 EMBEDDING_DIM = 384
 

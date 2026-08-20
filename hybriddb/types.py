@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from enum import Enum
 
-
 TEXT = "TEXT"
 LONGTEXT = "LONGTEXT"
 INTEGER = "INTEGER"
