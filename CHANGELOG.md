@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.6] — 2026-08-20
+
+### Fixed
+- FTS5 indexes are now backfilled after every rebuild (`reindex`, `drop_column`, `rename_column`, `import_sql`). External-content FTS5 tables start empty and triggers only index future writes, so keyword search silently returned zero results for existing rows after any of these operations. `_create_fts5` now runs the `'rebuild'` command on creation. (#bug)
+- `add_node`/`add_nodes` no longer delete a node's edges when re-adding an existing id. `INSERT OR REPLACE` triggered the `_graph_edges` FK `ON DELETE CASCADE` (REPLACE = DELETE + INSERT), silently wiping all edges of the node. Now an `ON CONFLICT(id) DO UPDATE` upsert that preserves edges and `created_at`. (#bug)
+- Journal processing is now chronological with last-op-wins per row instead of grouped by op type. Grouped processing broke the journal order: delete-then-reinsert of a TEXT-PK row (rowid reused, no AUTOINCREMENT) produced duplicate ids in one Chroma upsert call (`DuplicateIDError`), wedging the journal permanently — every subsequent `sync=True` operation and even `search()` raised. Updates are applied as upserts so a row whose add fell outside the batch still lands in Chroma. (#bug)
+- DuckDB analytics now supports custom-PK tables. The mirror no longer injects a synthetic `id BIGINT` column for tables whose PK is not named `id` (positional `INSERT INTO t SELECT * FROM src.t` mismatched columns, so `HybridDB.__init__` crashed with a `BinderException` on reopen, and incremental sync raised `no such column: id`). Full and incremental syncs now use the real PK column with parameterized values. Stale broken mirrors from older versions are detected at init and rebuilt automatically. (#bug)
+- `reconcile()` no longer hardcodes an `id` column — it queried `SELECT rowid, id, ...`, which failed with `no such column` for custom-PK tables and silently skipped self-healing. (#bug)
+- `insert`/`update` fetch rows by immutable SQLite `rowid` instead of by primary key, so updating the PK column works instead of crashing with `TypeError: 'NoneType' object is not iterable`. `insert` into a TEXT-PK table without providing the key now raises a clear `ValueError` instead of the same crash. (#bug)
+- `GraphAPI` facade now exposes `search_graph_ppr` and `sync_graph_nodes` (both raised `AttributeError` since v0.5.0/v0.5.3). (#bug)
+- `hybriddb.__version__` is back in sync with the package version (0.5.5). (#bug)
+- `_is_hnsw_header_corrupt` no longer flags every healthy index as corrupt. Chroma-hnswlib stores 4 bytes per dimension plus a fixed per-element overhead (140 bytes for the vendored build), so the old `size_data_per_element == EMBEDDING_DIM * 4` comparison always failed — with `auto_rebuild_chroma=True` the index was rebuilt on every startup. The expected size is now derived from the collection's real dimension in Chroma's catalog. (#bug)
+- `reindex()` (and therefore `import_sql`) no longer wipes Chroma metadata — the rebuild upsert now passes row metadata like `reconcile()` does. (#bug)
+- `insert()` returns the real primary key value (e.g. an empty string for a TEXT PK) instead of coercing falsy keys to `0`. (#bug)
+- DuckDB attach/detach cleanup is exception-safe: a failed `ATTACH` no longer masks the original error with a spurious `DETACH` failure, and broken mirror entries are dropped at init so they can be re-registered. (#bug)
+- `db.graph.add_node` now mirrors the mixin signature — the first positional argument is the node id (`db.graph.add_node("n1", label="A")`). Previously the facade treated it as the label, so mixin-style calls silently created nodes with random ids; pass only `label=` to auto-generate an id as before. (#bug)
+- Graph sync rules are validated at registration (`register_entity_node` rejects an unknown `id_column`) and stale rules no longer crash `sync_graph_nodes`/`search_graph`/`reconcile` — a rule referencing a dropped or renamed column is skipped with a warning instead of raising. (#bug)
+- `_process_meta_update` now actually refreshes Chroma metadata after `drop_column`/`rename_column` (it was a no-op). Chroma merges metadata on update/upsert, so records are re-added with fresh metadata to drop stale keys. (#bug)
+- `insert`/`insert_batch`/`update` now honor explicitly provided primary key values on default tables (e.g. `insert(id=100)`), and `update` correctly moves the row across Chroma and DuckDB when the PK changes — including INTEGER primary keys, where the rowid itself moves. Previously explicit ids were silently dropped and PK changes returned `False`/crashed. (#bug)
+- `_process_meta_update` self-heals: rows missing from a Chroma collection (e.g. after a failed rename copy) are re-embedded from the SQLite documents instead of being skipped, so semantic search recovers without a manual `reconcile`. (#bug)
+- `pagerank(personalization=...)` now raises a clear `ValueError` when personalization references nodes not in the graph, instead of a cryptic `ZeroDivisionError` from NetworkX. (#bug)
+- Empty/NULL longtext values are embedded by the configured embedding function (falling back to a zero vector only if it errors), so custom embedding dimensions no longer wedge the journal with a 384-dim zero vector. (#bug)
+- `insert`/`insert_batch`/`update` raise a clear `RuntimeError` (rolling back) if the row cannot be re-fetched after the write, instead of committing the change without journal entries (silent Chroma/DuckDB desync) or crashing with `TypeError: 'NoneType' object is not iterable`. (#bug)
+- `read_query` is now enforced read-only at the SQLite level via an authorizer. The first-token check could be bypassed with `WITH x AS (SELECT 1) DELETE FROM t`, which executed the write. Note: the authorizer receives the C API action codes, which differ from the incomplete constants exposed by Python's `sqlite3` module. (#bug)
+- `drop_column` now rejects dropping the primary key column with a clear `ValueError` — previously a custom TEXT PK was silently coerced to `INTEGER PRIMARY KEY AUTOINCREMENT`, corrupting the key values. (#bug)
+- The FTS5 fallback LIKE search now uses `ESCAPE '\'`, so queries containing `%` or `_` match the literal characters instead of nothing (the backslash escapes were previously ineffective). (#bug)
+
 ## [0.5.5] — 2026-08-16
 
 ### Breaking

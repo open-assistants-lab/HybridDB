@@ -221,8 +221,8 @@ Thread safety:
 Graph helpers are available directly and through `db.graph`.
 
 ```python
-alice = db.graph.add_node("Alice", type="person")
-bob = db.graph.add_node("Bob", type="person")
+alice = db.graph.add_node(label="Alice", type="person")
+bob = db.graph.add_node(label="Bob", type="person")
 db.graph.add_edge(None, alice, bob, edge_type="knows", weight=0.9)
 
 neighbors = db.graph.get_neighbors(alice)

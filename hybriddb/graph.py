@@ -140,6 +140,12 @@ class GraphMixin:
         meta = self._table_meta(table_name)
         if not meta:
             return False
+        pk_col = self._get_pk_column(table_name)
+        if id_column != pk_col and id_column not in meta["columns"]:
+            raise ValueError(
+                f"id_column '{id_column}' not found in table '{table_name}' "
+                f"(columns: {', '.join(sorted(meta['columns']))})"
+            )
         tmpl = label_template or f"{table_name}: {{{id_column}}}"
         with self._connect() as cur:
             cur.execute(
@@ -184,36 +190,47 @@ class GraphMixin:
             id_col = rule["id_column"]
             if not _is_safe_identifier(table) or not _is_safe_identifier(id_col):
                 continue
-            tmpl = rule["label_template"]
-            ntype = rule["node_type"]
-            rows = self.raw_query(f"SELECT * FROM {table}")
-            current_ids: set[str] = set()
-            for row in rows:
-                rid = str(row[id_col])
-                node_id = f"{table}:{rid}"
-                current_ids.add(node_id)
-                label = _render_label_template(tmpl, row)
-                existing = self.get_node(node_id)
-                if existing:
-                    if (existing.get("type") == ntype
-                            and existing.get("label") == label
-                            and existing.get("source") == "auto_sync"):
-                        continue
-                    self.update_node(node_id, {"label": label, "type": ntype, "source": "auto_sync"})
-                    result["nodes_updated"] += 1
-                else:
-                    self.add_node(node_id, label=label, type=ntype, source="auto_sync")
-                    result["nodes_created"] += 1
-            escaped = table.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            ghosts = self.raw_query(
-                "SELECT id FROM _graph_nodes WHERE source = 'auto_sync' AND id LIKE ? ESCAPE '\\'",
-                (f"{escaped}:%",),
-            )
-            for g in ghosts:
-                if g["id"] not in current_ids:
-                    self.delete_node(g["id"])
-                    result["nodes_removed"] += 1
+            try:
+                self._sync_graph_node_table_rule(rule, table, id_col, result)
+            except Exception as e:
+                logger.warning(
+                    "graph.node_sync_failed table=%s error=%s", table, e
+                )
+                continue
         return result
+
+    def _sync_graph_node_table_rule(
+        self, rule: dict, table: str, id_col: str, result: dict
+    ) -> None:
+        tmpl = rule["label_template"]
+        ntype = rule["node_type"]
+        rows = self.raw_query(f"SELECT * FROM {table}")
+        current_ids: set[str] = set()
+        for row in rows:
+            rid = str(row[id_col])
+            node_id = f"{table}:{rid}"
+            current_ids.add(node_id)
+            label = _render_label_template(tmpl, row)
+            existing = self.get_node(node_id)
+            if existing:
+                if (existing.get("type") == ntype
+                        and existing.get("label") == label
+                        and existing.get("source") == "auto_sync"):
+                    continue
+                self.update_node(node_id, {"label": label, "type": ntype, "source": "auto_sync"})
+                result["nodes_updated"] += 1
+            else:
+                self.add_node(node_id, label=label, type=ntype, source="auto_sync")
+                result["nodes_created"] += 1
+        escaped = table.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        ghosts = self.raw_query(
+            "SELECT id FROM _graph_nodes WHERE source = 'auto_sync' AND id LIKE ? ESCAPE '\\'",
+            (f"{escaped}:%",),
+        )
+        for g in ghosts:
+            if g["id"] not in current_ids:
+                self.delete_node(g["id"])
+                result["nodes_removed"] += 1
 
     def _auto_sync_graph_edges(self) -> dict:
         result = {"edges_created": 0}
@@ -221,31 +238,44 @@ class GraphMixin:
         for rule in rules:
             src_table = rule["source_table"]
             tgt_table = rule["target_table"]
-            if rule.get("source_column") is not None:
-                src_col = rule["source_column"]
-                tgt_col = rule["target_column"]
-            else:
-                src_col = rule["target_match"]
-                tgt_col = rule["target_column"] or self._get_pk_column(tgt_table)
-            actual_pk = self._get_pk_column(tgt_table)
-            if tgt_col == "id" and actual_pk != "id":
-                tgt_col = actual_pk
-            if (not _is_safe_identifier(src_table) or not _is_safe_identifier(tgt_table)
-                    or not _is_safe_identifier(src_col) or not _is_safe_identifier(tgt_col)):
+            try:
+                created = self._sync_graph_edge_rule(rule, src_table, tgt_table)
+                result["edges_created"] += created
+            except Exception as e:
+                logger.warning(
+                    "graph.edge_sync_failed src=%s tgt=%s error=%s",
+                    src_table, tgt_table, e,
+                )
                 continue
-            etype = rule["edge_type"]
-            src_pk = self._get_pk_column(src_table)
-            tgt_pk = self._get_pk_column(tgt_table)
-            pairs = self.raw_query(
-                f"SELECT s.{src_pk} as sid, t.{tgt_pk} as tid FROM {src_table} s "
-                f"JOIN {tgt_table} t ON s.{src_col} = t.{tgt_col}"
-            )
-            for pair in pairs:
-                sid = f"{src_table}:{pair['sid']}"
-                tid = f"{tgt_table}:{pair['tid']}"
-                self.add_edge(None, sid, tid, type=etype)
-                result["edges_created"] += 1
         return result
+
+    def _sync_graph_edge_rule(self, rule: dict, src_table: str, tgt_table: str) -> int:
+        if rule.get("source_column") is not None:
+            src_col = rule["source_column"]
+            tgt_col = rule["target_column"]
+        else:
+            src_col = rule["target_match"]
+            tgt_col = rule["target_column"] or self._get_pk_column(tgt_table)
+        actual_pk = self._get_pk_column(tgt_table)
+        if tgt_col == "id" and actual_pk != "id":
+            tgt_col = actual_pk
+        if (not _is_safe_identifier(src_table) or not _is_safe_identifier(tgt_table)
+                or not _is_safe_identifier(src_col) or not _is_safe_identifier(tgt_col)):
+            return 0
+        etype = rule["edge_type"]
+        src_pk = self._get_pk_column(src_table)
+        tgt_pk = self._get_pk_column(tgt_table)
+        pairs = self.raw_query(
+            f"SELECT s.{src_pk} as sid, t.{tgt_pk} as tid FROM {src_table} s "
+            f"JOIN {tgt_table} t ON s.{src_col} = t.{tgt_col}"
+        )
+        created = 0
+        for pair in pairs:
+            sid = f"{src_table}:{pair['sid']}"
+            tid = f"{tgt_table}:{pair['tid']}"
+            self.add_edge(None, sid, tid, type=etype)
+            created += 1
+        return created
 
     def add_node(
         self, node_id: str, label: str = "", type: str = "node",
@@ -257,9 +287,14 @@ class GraphMixin:
         props_json = json.dumps(properties or {})
         with self._connect() as cur:
             cur.execute(
-                "INSERT OR REPLACE INTO _graph_nodes "
+                "INSERT INTO _graph_nodes "
                 "(id, label, type, domain, confidence, source, properties, "
-                "embedding_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "embedding_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "label=excluded.label, type=excluded.type, domain=excluded.domain, "
+                "confidence=excluded.confidence, source=excluded.source, "
+                "properties=excluded.properties, embedding_model=excluded.embedding_model, "
+                "updated_at=excluded.updated_at",
                 (node_id, label, type, domain, confidence, source, props_json,
                  self._embedding_model_name, now, now),
             )
@@ -273,9 +308,14 @@ class GraphMixin:
                 node_id = n["id"]
                 now = _now_iso()
                 cur.execute(
-                    "INSERT OR REPLACE INTO _graph_nodes "
+                    "INSERT INTO _graph_nodes "
                     "(id, label, type, domain, confidence, source, properties, "
-                    "embedding_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "embedding_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET "
+                    "label=excluded.label, type=excluded.type, domain=excluded.domain, "
+                    "confidence=excluded.confidence, source=excluded.source, "
+                    "properties=excluded.properties, embedding_model=excluded.embedding_model, "
+                    "updated_at=excluded.updated_at",
                     (node_id, n.get("label", ""), n.get("type", "node"), n.get("domain", ""),
                      n.get("confidence", 0.5), n.get("source", "inferred"),
                      json.dumps(n.get("properties", {})), self._embedding_model_name, now, now),
@@ -633,6 +673,14 @@ class GraphMixin:
         import networkx as nx
 
         G = self.to_networkx(directed=True)
+        if personalization is not None:
+            missing = set(personalization) - set(G.nodes)
+            if missing:
+                raise ValueError(
+                    f"personalization references nodes not in the graph: "
+                    f"{sorted(missing)}. Use search_graph_ppr() to build "
+                    f"personalization from live seeds."
+                )
         return nx.pagerank(
             G, alpha=alpha, weight="weight",
             personalization=personalization,

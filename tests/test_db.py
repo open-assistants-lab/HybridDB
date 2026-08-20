@@ -446,8 +446,13 @@ class TestAsyncApi:
 
 class TestFacades:
     def test_graph_facade_delegates_to_graph_methods(self, db):
-        node_id = db.graph.add_node("Alice", type="person")
+        node_id = db.graph.add_node(label="Alice", type="person")
         assert db.graph.get_node(node_id)["label"] == "Alice"
+
+    def test_graph_facade_add_node_node_id_first(self, db):
+        # mixin-style call: first positional arg is the node id
+        db.graph.add_node("n1", label="A")
+        assert db.graph.get_node("n1")["label"] == "A"
 
     def test_graph_edge_type_and_get_neighbors_aliases(self, db):
         db.add_node("a", label="A")

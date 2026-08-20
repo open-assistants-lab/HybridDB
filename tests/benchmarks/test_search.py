@@ -67,7 +67,7 @@ def test_vector_search_text(benchmark, db, scale):
     query = "test search"
 
     def _search():
-        return db.search("bench_search", query, mode=SearchMode.SEMANTIC)
+        return db.search("bench_search", "content", query, mode=SearchMode.SEMANTIC)
 
     result = benchmark(_search)
     assert result == []

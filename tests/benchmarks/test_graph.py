@@ -9,8 +9,9 @@ networkx = pytest.importorskip("networkx")
 
 @pytest.fixture
 def graph_db(db):
-    db.create_table("nodes", {"type": "TEXT", "label": "TEXT"})
-    db.create_table("edges", {"source_id": "TEXT", "target_id": "TEXT", "type": "TEXT", "weight": "REAL"})
+    # nodes use a TEXT primary key: generated ids are strings like "n0"
+    db.create_table("nodes", {"id": "TEXT PRIMARY KEY", "type": "TEXT", "label": "TEXT"})
+    db.create_table("edges", {"id": "TEXT PRIMARY KEY", "source_id": "TEXT", "target_id": "TEXT", "type": "TEXT", "weight": "REAL"})
     return db
 
 

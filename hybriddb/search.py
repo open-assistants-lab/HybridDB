@@ -187,7 +187,8 @@ class SearchMixin:
                 escaped = query.replace("%", "\\%").replace("_", "\\_")
                 with self._connect() as cur:
                     cur.execute(
-                        f"SELECT {rowid_col} as id, 0.0 as score FROM {table} WHERE {column} LIKE ? LIMIT ?",
+                        f"SELECT {rowid_col} as id, 0.0 as score FROM {table} "
+                        f"WHERE {column} LIKE ? ESCAPE '\\' LIMIT ?",
                         (f"%{escaped}%", limit),
                     )
                     rows = cur.fetchall()

@@ -58,7 +58,7 @@ async def main():
         with db.cursor() as cur:
             cur.execute('SELECT COUNT(*) FROM docs')
             assert cur.fetchone()[0] == 1
-        node_id = db.graph.add_node('Alice', type='person')
+        node_id = db.graph.add_node(label='Alice', type='person')
         assert db.graph.get_node(node_id)['label'] == 'Alice'
         assert db.olap.query('SELECT COUNT(*) AS total FROM docs')[0]['total'] == 1
         await db.aclose()

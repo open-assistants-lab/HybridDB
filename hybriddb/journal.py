@@ -72,74 +72,55 @@ class JournalMixin:
         if not entries:
             return 0
 
-        chroma_entries = [e for e in entries if e["op"] in ("add", "update", "delete", "meta_update")]
+        chroma_entries = [e for e in entries if e["op"] in ("add", "update", "delete")]
         row_entries = [e for e in entries if e["op"].startswith("row_")]
 
-        adds = [e for e in chroma_entries if e["op"] == "add"]
-        updates = [e for e in chroma_entries if e["op"] == "update"]
-        deletes = [e for e in chroma_entries if e["op"] == "delete"]
-        meta_updates = [e for e in chroma_entries if e["op"] == "meta_update"]
-
-        by_collection: dict[str, dict[str, list]] = defaultdict(
-            lambda: {"ids": [], "embeddings": [], "documents": [], "metadatas": []}
-        )
-        for entry in adds:
+        # Apply chroma ops chronologically with last-op-wins per row. Grouping
+        # by op type (all adds, then all deletes) broke the journal order:
+        # e.g. delete-then-reinsert of a TEXT-PK row (rowid reused) produced
+        # duplicate ids in one upsert call (DuplicateIDError, permanent
+        # journal wedge) or left Chroma with the wrong final state.
+        final_by_collection: dict[str, dict[str, dict]] = defaultdict(dict)
+        for entry in chroma_entries:
             collection_name = f"{entry['app_table']}_{entry['column_name']}"
-            doc = entry["data"] or ""
-            embedding = self._get_embedding(doc)
-            metadata = json.loads(entry["metadata"]) if entry["metadata"] else {}
-            if not metadata:
-                metadata = None
-            by_collection[collection_name]["ids"].append(str(entry["row_id"]))
-            by_collection[collection_name]["embeddings"].append(embedding)
-            by_collection[collection_name]["documents"].append(doc)
-            by_collection[collection_name]["metadatas"].append(metadata)
+            final_by_collection[collection_name][str(entry["row_id"])] = entry
 
-        for coll_name, batch in by_collection.items():
+        for coll_name, by_id in final_by_collection.items():
             collection = self._get_collection(coll_name)
             if collection is None:
                 continue
-            for i in range(0, len(batch["ids"]), CHROMA_BATCH):
-                kwargs: dict[str, Any] = {
-                    "ids": batch["ids"][i:i + CHROMA_BATCH],
-                    "embeddings": batch["embeddings"][i:i + CHROMA_BATCH],
-                    "documents": batch["documents"][i:i + CHROMA_BATCH],
-                }
-                metas = batch["metadatas"][i:i + CHROMA_BATCH]
-                if any(m is not None for m in metas):
-                    kwargs["metadatas"] = metas
-                collection.upsert(**kwargs)
-
-        by_collection_del: dict[str, list[str]] = defaultdict(list)
-        for entry in deletes:
-            collection_name = f"{entry['app_table']}_{entry['column_name']}"
-            by_collection_del[collection_name].append(str(entry["row_id"]))
-
-        for coll_name, ids in by_collection_del.items():
-            collection = self._get_collection(coll_name)
-            if collection is None:
-                continue
+            ids = list(by_id.keys())
             for i in range(0, len(ids), CHROMA_BATCH):
-                collection.delete(ids=ids[i:i + CHROMA_BATCH])
+                chunk = ids[i:i + CHROMA_BATCH]
+                upsert_ids: list[str] = []
+                embeddings: list[list[float]] = []
+                documents: list[str] = []
+                metadatas: list[dict | None] = []
+                delete_ids: list[str] = []
+                for rid in chunk:
+                    entry = by_id[rid]
+                    if entry["op"] == "delete":
+                        delete_ids.append(rid)
+                        continue
+                    doc = entry["data"] or ""
+                    upsert_ids.append(rid)
+                    embeddings.append(self._get_embedding(doc))
+                    documents.append(doc)
+                    metadata = json.loads(entry["metadata"]) if entry["metadata"] else {}
+                    metadatas.append(metadata or None)
+                if delete_ids:
+                    collection.delete(ids=delete_ids)
+                if upsert_ids:
+                    kwargs: dict[str, Any] = {
+                        "ids": upsert_ids,
+                        "embeddings": embeddings,
+                        "documents": documents,
+                    }
+                    if any(m is not None for m in metadatas):
+                        kwargs["metadatas"] = metadatas
+                    collection.upsert(**kwargs)
 
-        for entry in updates:
-            collection_name = f"{entry['app_table']}_{entry['column_name']}"
-            try:
-                collection = self._get_collection(collection_name)
-                metadata = json.loads(entry["metadata"]) if entry["metadata"] else {}
-                doc = entry["data"] or ""
-                embedding = self._get_embedding(doc)
-                update_kwargs: dict[str, Any] = {
-                    "ids": [str(entry["row_id"])], "embeddings": [embedding],
-                    "documents": [doc],
-                }
-                if metadata:
-                    update_kwargs["metadatas"] = [metadata]
-                collection.update(**update_kwargs)
-            except Exception as e:
-                logger.warning("journal.update_failed entry_id=%s error=%s", entry["id"], e)
-
-        for entry in meta_updates:
+        for entry in [e for e in entries if e["op"] == "meta_update"]:
             try:
                 self._process_meta_update(entry)
             except Exception as e:
@@ -167,7 +148,65 @@ class JournalMixin:
         return len(done_ids)
 
     def _process_meta_update(self, entry: dict) -> None:
-        pass
+        """Refresh Chroma metadata for a table/column after a schema change.
+
+        ``drop_column``/``rename_column`` write ``meta_update`` journal
+        entries so stored metadata stays in sync with the new schema
+        (e.g. renamed keys, removed columns). Chroma merges metadata on
+        update/upsert and rejects empty dicts, so stale keys can only be
+        removed by deleting and re-adding the records with fresh metadata.
+        """
+        table = entry["app_table"]
+        col = entry["column_name"]
+        if not col:
+            return
+        collection = self._get_collection(f"{table}_{col}")
+        if collection is None:
+            return
+        rows = self.raw_query(f"SELECT *, rowid AS _row FROM {table}")
+        if not rows:
+            return
+        rows_by_id = {str(r["_row"]): dict(r) for r in rows}
+        meta_by_id = {
+            rid: self._row_to_metadata(table, row) for rid, row in rows_by_id.items()
+        }
+        ids = list(meta_by_id.keys())
+        for i in range(0, len(ids), CHROMA_BATCH):
+            chunk = ids[i:i + CHROMA_BATCH]
+            existing = collection.get(ids=chunk, include=["embeddings", "documents"])
+            existing_ids = existing.get("ids", [])
+            if existing_ids:
+                embeddings = existing.get("embeddings")
+                documents = existing.get("documents")
+                if embeddings is None or documents is None \
+                        or len(embeddings) != len(existing_ids) or len(documents) != len(existing_ids):
+                    logger.warning(
+                        "journal.meta_update_missing_data table=%s column=%s", table, col
+                    )
+                    continue
+                if any(e is None for e in embeddings) or any(doc is None for doc in documents):
+                    logger.warning(
+                        "journal.meta_update_missing_data table=%s column=%s", table, col
+                    )
+                    continue
+                collection.delete(ids=existing_ids)
+                collection.add(
+                    ids=existing_ids,
+                    embeddings=embeddings,
+                    documents=documents,
+                    metadatas=[meta_by_id[i] for i in existing_ids],
+                )
+            # Self-heal: ids absent from the collection (e.g. a failed
+            # rename copy) are re-embedded from the SQLite documents.
+            missing_ids = [rid for rid in chunk if rid not in set(existing_ids)]
+            if missing_ids:
+                docs = [rows_by_id[rid][col] or "" for rid in missing_ids]
+                collection.add(
+                    ids=missing_ids,
+                    embeddings=[self._get_embedding(doc) for doc in docs],
+                    documents=docs,
+                    metadatas=[meta_by_id[rid] for rid in missing_ids],
+                )
 
     def journal_status(self, table: str | None = None) -> dict:
         if table:

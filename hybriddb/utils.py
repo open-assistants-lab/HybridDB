@@ -20,6 +20,9 @@ _CHROMA_INDEX_WARN_FACTOR = 0.5
 _CHROMA_INDEX_MAX_M0 = 256
 _CHROMA_INDEX_MAX_ELEMENTS = 10_000_000
 _CHROMA_REBUILD_BATCH = 5000
+# chroma-hnswlib stores label + extra data per element on top of the
+# vector itself: size_data_per_element = 4 * dim + this overhead.
+_CHROMA_HNSW_DATA_OVERHEAD = 140
 
 _SKIP_SEARCH_COLUMNS: set[str] = {
     "rowid", "id", "memory_id", "fact_key", "scope", "project_id",

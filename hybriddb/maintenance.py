@@ -18,6 +18,7 @@ from hybriddb.utils import (
     CHROMA_BATCH,
     _CHROMA_INDEX_MAX_ELEMENTS,
     _CHROMA_INDEX_MAX_M0,
+    _CHROMA_HNSW_DATA_OVERHEAD,
     _CHROMA_INDEX_WARN_FACTOR,
     _CHROMA_REBUILD_BATCH,
     _validate_identifier,
@@ -43,7 +44,9 @@ class MaintenanceMixin:
 
             size_bytes = link_file.stat().st_size
             size_gb = size_bytes / (1024**3)
-            header_corrupt = self._is_hnsw_header_corrupt(str(header_file))
+            dim = self._segment_dimension(seg_dir.name)
+            expected_size = dim * 4 + _CHROMA_HNSW_DATA_OVERHEAD if dim is not None else None
+            header_corrupt = self._is_hnsw_header_corrupt(str(header_file), expected_size)
 
             if size_bytes >= warn_bytes or header_corrupt:
                 logger.warning(
@@ -63,7 +66,7 @@ class MaintenanceMixin:
                     return
 
     @staticmethod
-    def _is_hnsw_header_corrupt(header_path: str) -> bool:
+    def _is_hnsw_header_corrupt(header_path: str, expected_size: int | None = None) -> bool:
         try:
             with open(header_path, "rb") as f:
                 data = f.read()
@@ -79,13 +82,41 @@ class MaintenanceMixin:
             max_m0 = struct.unpack_from("Q", data, 68)[0]
             if max_elements == 0 or max_elements > _CHROMA_INDEX_MAX_ELEMENTS:
                 return True
-            if size_data_per_element != EMBEDDING_DIM * 4:
+            # Per-element data size is 4 bytes per dimension plus chroma-
+            # hnswlib's fixed per-element overhead (label + extra, 140 bytes
+            # for the vendored build). Comparing against EMBEDDING_DIM * 4
+            # alone flagged every healthy index as corrupt, causing an
+            # auto-rebuild on every startup.
+            if expected_size is not None and size_data_per_element != expected_size:
                 return True
             if max_m0 > _CHROMA_INDEX_MAX_M0:
                 return True
             return False
         except Exception:
             return True
+
+    def _segment_dimension(self, segment_id: str) -> int | None:
+        """Return the embedding dimension for a Chroma segment (UUID dir name).
+
+        Vector files live in ``vectors/<segment-id>/``; the dimension is
+        stored per collection in Chroma's own sqlite catalog.
+        """
+        sqlite_path = Path(self._vector_path) / "chroma.sqlite3"
+        if not sqlite_path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(str(sqlite_path))
+            try:
+                row = conn.execute(
+                    "SELECT c.dimension FROM segments s "
+                    "JOIN collections c ON c.id = s.collection WHERE s.id = ?",
+                    (segment_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            return row[0] if row else None
+        except Exception:
+            return None
 
     def _rebuild_chroma_index(self) -> None:
         if self._chroma is None:
@@ -159,7 +190,13 @@ class MaintenanceMixin:
 
     def _get_embedding(self, text: str) -> list[float]:
         if not text:
-            return [0.0] * EMBEDDING_DIM
+            try:
+                # Let the embedding function produce its own zero vector so
+                # the dimension matches the collection (custom models may
+                # not be 384-dim like the default).
+                return self._embedding_fn("")
+            except Exception:
+                return [0.0] * EMBEDDING_DIM
         return self._embedding_fn(text)
 
     def _get_collection(self, name: str):
@@ -179,7 +216,7 @@ class MaintenanceMixin:
                 chroma_ids = set(collection.get()["ids"]) if collection.count() > 0 else set()
 
                 with self._connect() as cur:
-                    cur.execute(f"SELECT rowid as _row, id, {col} FROM {table}")
+                    cur.execute(f"SELECT rowid as _row, {col} FROM {table}")
                     sql_rows = cur.fetchall()
 
                 sql_ids = {str(r["_row"]) for r in sql_rows}
@@ -514,7 +551,7 @@ class MaintenanceMixin:
                     offset = 0
                     while True:
                         rows = self.raw_query(
-                            f"SELECT rowid as _row, {col} FROM {tbl} "
+                            f"SELECT *, rowid as _row FROM {tbl} "
                             f"ORDER BY rowid LIMIT {CHROMA_BATCH} OFFSET {offset}"
                         )
                         if not rows:
@@ -522,10 +559,12 @@ class MaintenanceMixin:
                         ids_batch = [str(r["_row"]) for r in rows]
                         docs_batch = [r[col] or "" for r in rows]
                         emb_batch = [self._get_embedding(d) for d in docs_batch]
+                        metas_batch = [self._row_to_metadata(tbl, dict(r)) for r in rows]
                         collection.upsert(
                             ids=ids_batch,
                             embeddings=emb_batch,
                             documents=docs_batch,
+                            metadatas=metas_batch,
                         )
                         offset += CHROMA_BATCH
 

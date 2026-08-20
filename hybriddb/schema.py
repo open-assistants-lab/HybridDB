@@ -92,6 +92,14 @@ class SchemaMixin:
             return False
         return "INTEGER PRIMARY KEY AUTOINCREMENT" in row["sql"]
 
+    @staticmethod
+    def _pk_column_type(table: str, cur: sqlite3.Cursor) -> str | None:
+        cur.execute(f"PRAGMA table_info({table})")
+        for row in cur.fetchall():
+            if row["pk"] > 0:
+                return row["type"]
+        return None
+
     def _get_pk_column(self, table: str, cur: sqlite3.Cursor | None = None) -> str:
         if cur is None:
             with self._connect() as cur:
@@ -152,6 +160,11 @@ class SchemaMixin:
             f"VALUES ('delete', {old_rowid_ref}, old.{col}); "
             f"INSERT INTO {fts_name}(rowid, {col}) VALUES ({rowid_ref}, new.{col}); END"
         )
+        # Backfill: external-content FTS5 tables start empty; triggers only
+        # index future writes. Without this, keyword search silently returns
+        # nothing for existing rows after any index rebuild (reindex,
+        # drop_column, rename_column, import_sql).
+        cur.execute(f"INSERT INTO {fts_name}({fts_name}) VALUES('rebuild')")
 
     def _drop_fts5(self, cur: sqlite3.Cursor, table: str, col: str) -> None:
         fts_name = f"{table}_fts_{col}"
@@ -269,6 +282,12 @@ class SchemaMixin:
         meta = self._table_meta(table)
         if not meta or column not in meta["columns"]:
             raise ValueError(f"Column '{column}' not found in table '{table}'")
+        with self._connect() as cur:
+            pk_col = self._get_pk_column(table, cur=cur)
+            if column == pk_col:
+                raise ValueError(
+                    f"Cannot drop primary key column '{column}' from table '{table}'"
+                )
         col_type = meta["columns"][column]
         old_columns = {k: v for k, v in meta["columns"].items() if k != column}
 

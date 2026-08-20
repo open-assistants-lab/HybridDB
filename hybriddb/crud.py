@@ -63,6 +63,12 @@ class CrudMixin:
         if not meta:
             raise ValueError(f"Table '{table}' not found")
         filtered = {k: v for k, v in data.items() if k in meta["columns"]}
+        # The implicit autoincrement PK is not part of _schema metadata;
+        # honor an explicitly provided value (e.g. insert(id=100)) instead
+        # of silently dropping it.
+        pk_col = self._get_pk_column(table)
+        if pk_col not in meta["columns"] and pk_col in data:
+            filtered[pk_col] = data[pk_col]
         columns = list(filtered.keys())
         placeholders = ", ".join("?" * len(columns))
         col_types = meta["columns"]
@@ -80,8 +86,22 @@ class CrudMixin:
             if pk_col in filtered:
                 user_pk = filtered[pk_col]
             else:
+                # No PK supplied: only valid when the PK aliases SQLite rowid
+                # (INTEGER PRIMARY KEY), otherwise the row is unfindable.
+                pk_type = self._pk_column_type(table, cur=cur)
+                if pk_col != "rowid" and pk_type is not None and "INT" not in pk_type.upper():
+                    raise ValueError(
+                        f"Missing required primary key column '{pk_col}' for insert into '{table}'"
+                    )
                 user_pk = internal_rowid
-            row = dict(cur.execute(f"SELECT * FROM {table} WHERE {pk_col} = ?", (user_pk,)).fetchone())
+            fetched = cur.execute(
+                f"SELECT * FROM {table} WHERE rowid = ?", (internal_rowid,)
+            ).fetchone()
+            if fetched is None:
+                raise RuntimeError(
+                    f"Inserted row not found in '{table}' (rowid {internal_rowid})"
+                )
+            row = dict(fetched)
 
             metadata = self._row_to_metadata(table, row)
             now = _now_iso()
@@ -100,7 +120,7 @@ class CrudMixin:
             )
         if sync:
             self._process_journal()
-        return user_pk or 0
+        return user_pk if user_pk is not None else 0
 
     def row_to_metadata(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
         _validate_identifier(table, "table")
@@ -133,6 +153,8 @@ class CrudMixin:
             pk_col = self._get_pk_column(table, cur=cur)
             for data in rows:
                 filtered = {k: v for k, v in data.items() if k in meta["columns"]}
+                if pk_col not in meta["columns"] and pk_col in data:
+                    filtered[pk_col] = data[pk_col]
                 columns = list(filtered.keys())
                 placeholders = ", ".join("?" * len(columns))
                 col_types = meta["columns"]
@@ -147,9 +169,20 @@ class CrudMixin:
                 if pk_col in filtered:
                     user_pk = filtered[pk_col]
                 else:
-                    assert internal_rowid is not None
+                    pk_type = self._pk_column_type(table, cur=cur)
+                    if pk_col != "rowid" and pk_type is not None and "INT" not in pk_type.upper():
+                        raise ValueError(
+                            f"Missing required primary key column '{pk_col}' for insert into '{table}'"
+                        )
                     user_pk = internal_rowid
-                row = dict(cur.execute(f"SELECT * FROM {table} WHERE {pk_col} = ?", (user_pk,)).fetchone())
+                fetched = cur.execute(
+                    f"SELECT * FROM {table} WHERE rowid = ?", (internal_rowid,)
+                ).fetchone()
+                if fetched is None:
+                    raise RuntimeError(
+                        f"Inserted row not found in '{table}' (rowid {internal_rowid})"
+                    )
+                row = dict(fetched)
                 ids.append(user_pk)
                 metadata = self._row_to_metadata(table, row)
                 for col in self._get_longtext_columns(table):
@@ -173,6 +206,9 @@ class CrudMixin:
         if not meta:
             raise ValueError(f"Table '{table}' not found")
         filtered = {k: v for k, v in data.items() if k in meta["columns"]}
+        pk_col = self._get_pk_column(table)
+        if pk_col not in meta["columns"] and pk_col in data:
+            filtered[pk_col] = data[pk_col]
         if not filtered:
             return False
 
@@ -193,21 +229,80 @@ class CrudMixin:
             cur.execute(f"UPDATE {table} SET {set_clause} WHERE {pk_col} = ?", values + [row_id])
             if cur.rowcount == 0:
                 return False
-            row = dict(cur.execute(f"SELECT * FROM {table} WHERE {pk_col} = ?", (row_id,)).fetchone())
+            new_pk = filtered.get(pk_col)
+            pk_changed = new_pk is not None and new_pk != row_id
+            # Fetch by the new PK when the PK changed (the rowid itself moves
+            # for INTEGER PRIMARY KEY tables, since they alias rowid), falling
+            # back to the immutable rowid otherwise.
+            row = None
+            new_rowid = internal_rowid
+            if pk_changed:
+                fetched = cur.execute(
+                    f"SELECT * FROM {table} WHERE {pk_col} = ?", (new_pk,)
+                ).fetchone()
+                if fetched is not None:
+                    row = dict(fetched)
+                r = cur.execute(
+                    f"SELECT rowid FROM {table} WHERE {pk_col} = ?", (new_pk,)
+                ).fetchone()
+                if r is not None:
+                    new_rowid = r[0]
+            if row is None:
+                fetched = cur.execute(
+                    f"SELECT * FROM {table} WHERE rowid = ?", (internal_rowid,)
+                ).fetchone()
+                if fetched is None:
+                    # The row vanished mid-update (e.g. a trigger). Roll back
+                    # instead of committing the change without journal entries,
+                    # which would silently desync Chroma/DuckDB.
+                    raise RuntimeError(
+                        f"Row disappeared during update of '{table}' (rowid {internal_rowid})"
+                    )
+                row = dict(fetched)
             metadata = self._row_to_metadata(table, row)
-            for col in self._get_longtext_columns(table):
+            lt_cols = self._get_longtext_columns(table)
+            if pk_changed:
+                # The row's Chroma key is the rowid (or the PK itself for
+                # INTEGER PRIMARY KEYs). Moving the PK means deleting the old
+                # key and re-adding the row under its new key; DuckDB also
+                # needs the old app id deleted explicitly.
+                for col in lt_cols:
+                    now = _now_iso()
+                    cur.execute(
+                        "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
+                        "VALUES (?, ?, ?, 'delete', ?)",
+                        (table, internal_rowid, col, now),
+                    )
+                    cur.execute(
+                        "INSERT INTO _journal (app_table, row_id, column_name, op, data, metadata, created_at) "
+                        "VALUES (?, ?, ?, 'add', ?, ?, ?)",
+                        (table, new_rowid, col, row.get(col, ""), json.dumps(metadata), now),
+                    )
                 now = _now_iso()
                 cur.execute(
-                    "INSERT INTO _journal (app_table, row_id, column_name, op, data, metadata, created_at) "
-                    "VALUES (?, ?, ?, 'update', ?, ?, ?)",
-                    (table, internal_rowid, col, row.get(col, ""), json.dumps(metadata), now),
+                    "INSERT INTO _journal (app_table, row_id, op, created_at, data) "
+                    "VALUES (?, ?, 'row_delete', ?, ?)",
+                    (table, internal_rowid, now, str(row_id)),
                 )
-            now = _now_iso()
-            cur.execute(
-                "INSERT INTO _journal (app_table, row_id, op, data, created_at) "
-                "VALUES (?, ?, 'row_update', ?, ?)",
-                (table, internal_rowid, json.dumps(dict(row), default=str), now),
-            )
+                cur.execute(
+                    "INSERT INTO _journal (app_table, row_id, op, data, created_at) "
+                    "VALUES (?, ?, 'row_add', ?, ?)",
+                    (table, new_rowid, json.dumps(dict(row), default=str), now),
+                )
+            else:
+                for col in lt_cols:
+                    now = _now_iso()
+                    cur.execute(
+                        "INSERT INTO _journal (app_table, row_id, column_name, op, data, metadata, created_at) "
+                        "VALUES (?, ?, ?, 'update', ?, ?, ?)",
+                        (table, internal_rowid, col, row.get(col, ""), json.dumps(metadata), now),
+                    )
+                now = _now_iso()
+                cur.execute(
+                    "INSERT INTO _journal (app_table, row_id, op, data, created_at) "
+                    "VALUES (?, ?, 'row_update', ?, ?)",
+                    (table, internal_rowid, json.dumps(dict(row), default=str), now),
+                )
         if sync:
             self._process_journal()
         return True
@@ -277,7 +372,27 @@ class CrudMixin:
         first = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
         if first not in {"SELECT", "WITH", "PRAGMA", "EXPLAIN"}:
             raise ValueError("read_query only accepts read-only SQL")
-        return self.raw_query(sql, params)
+        # The first-token check is not enough: ``WITH x AS (SELECT 1) DELETE
+        # FROM t`` starts with WITH but writes. Enforce read-only at the
+        # SQLite level with an authorizer. Note: the authorizer receives the
+        # C API action codes, which differ from the (incomplete) constants
+        # exposed by Python's sqlite3 module, so use the raw values.
+        # Allowed: PRAGMA(19), READ(20), SELECT(21), FUNCTION(31), RECURSIVE(33).
+        _READ_ACTIONS = {19, 20, 21, 31, 33}
+
+        conn = sqlite3.connect(self._db_path)
+        try:
+            def _deny_writes(action, arg1, arg2, dbname, source):
+                return sqlite3.SQLITE_OK if action in _READ_ACTIONS else sqlite3.SQLITE_DENY
+
+            conn.set_authorizer(_deny_writes)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
 
     def count(self, table: str, where: str = "", params: tuple = ()) -> int:
         _validate_identifier(table, "table")
