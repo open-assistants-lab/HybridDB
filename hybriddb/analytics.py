@@ -118,7 +118,7 @@ class AnalyticsMixin:
             sqlite_cols = [(row["name"], row["type"]) for row in cur.fetchall()]
         type_map = {
             "BOOLEAN": "INTEGER", "JSON": "TEXT", "TEXT": "TEXT",
-            "LONGTEXT": "TEXT", "INTEGER": "BIGINT", "REAL": "REAL",
+            "LONGTEXT": "TEXT", "INTEGER": "BIGINT", "REAL": "DOUBLE",
         }
         duck_cols: list[tuple[str, str]] = []
         for name, sqlite_type in sqlite_cols:
