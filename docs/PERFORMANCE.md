@@ -132,6 +132,31 @@ journal fully before returning (the honest cost is paid upfront, in the
 write call); `sync=False` + `process_journal()` keeps the bounded-batch
 progressive behavior for callers who want control.
 
+### FULL-scale scaling validation (100k docs / 10k graph nodes / 1M analytics rows)
+
+| Operation | Smoke | FULL | Scaling |
+|---|---|---|---|
+| keyword search (TEXT) | 7.0ms | 53ms | 7.6× for 2,000× data |
+| vector search (TEXT) | 1.9ms | 38ms | ~sub-linear |
+| hybrid search (TEXT) | 5.2ms | 52ms | ~sub-linear |
+| analytics agg (1M rows) | 0.2ms | 1.7ms | vectorized |
+| analytics group-by (1M) | 0.4ms | 2.4ms | vectorized |
+| analytics join (1M) | 0.7ms | 8.3ms | vectorized |
+| get_neighbors (10k nodes) | 0.9ms | 7.7ms | ✓ |
+| pagerank (10k nodes) | 0.5ms | 51ms | ✓ |
+| traverse depth 3 (50k edges) | 2.5ms | 0.8s | CTE breadth |
+| to_networkx build (10k) | 2.7ms | 297ms | ✓ (cache ~0ms) |
+| sync_graph_nodes (10k) | 43ms | 5.9s | 0.6ms/node |
+| community_detect (10k) | 2.3ms | 1.3s | ✓ |
+| betweenness (1k nodes) | 6.9ms | 4.5s | O(N·E) — cap size |
+| search_graph (10k) | 52ms | 6.1s | seed+expand |
+| search_graph_ppr (10k) | 52ms | 5.9s | seed+PPR |
+
+Search latency stays sub-100ms at 100k docs; analytics stays single-digit ms
+at 1M rows; the graph scales linearly-ish with nodes/edges, with semantic
+retrieval (search_graph/PPR) and traversal as the dominant costs at 10k-node
+scale.
+
 ## 3. Graph Performance (smoke scale: 50 nodes / 150 edges)
 
 | Operation | Mean |

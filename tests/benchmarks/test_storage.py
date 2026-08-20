@@ -26,6 +26,7 @@ def test_db_file_growth(benchmark, db, scale):
     db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "TEXT"})
 
     def _measure():
+        db.raw_query("DELETE FROM bench_storage")
         db.insert_batch("bench_storage", docs, sync=False)
         return _dir_size(db._db_path)
 
@@ -40,6 +41,7 @@ def test_chroma_segment_growth(benchmark, db, scale):
     chroma_path = db._vector_path
 
     def _measure():
+        db.raw_query("DELETE FROM bench_storage")
         db.insert_batch("bench_storage", docs, sync=True)
         if os.path.isdir(chroma_path):
             return _dir_size(chroma_path)
@@ -55,6 +57,7 @@ def test_total_storage(benchmark, db, scale):
     db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
 
     def _measure():
+        db.raw_query("DELETE FROM bench_storage")
         db.insert_batch("bench_storage", docs, sync=True)
         sqlite_size = _dir_size(db._db_path)
         chroma_size = (
@@ -72,6 +75,7 @@ def test_chroma_bloat_check(benchmark, db, scale):
     db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
 
     def _measure():
+        db.raw_query("DELETE FROM bench_storage")
         db.insert_batch("bench_storage", docs, sync=True)
         if not os.path.isdir(db._vector_path):
             return {"segment_count": 0, "avg_segment_bytes": 0}
