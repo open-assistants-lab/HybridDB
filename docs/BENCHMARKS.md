@@ -13,7 +13,7 @@ uv run python -m pytest -q
 Expected shape:
 
 ```text
-180 passed, 28 skipped
+180 passed, 33 skipped
 ```
 
 The skipped tests are benchmark tests under `tests/benchmarks/`.
@@ -29,7 +29,7 @@ uv run python -m pytest tests/benchmarks -q --run-benchmarks --benchmark-disable
 Expected shape:
 
 ```text
-28 passed
+33 passed
 ```
 
 Smoke scale is intentionally small:
@@ -84,6 +84,25 @@ When `--benchmark-json` is provided, benchmark results are archived in `results/
 
 - Timestamped copy: `results/YYYY-MM-DDTHHMMSS-<git-hash>.json`
 - Latest copy: `results/latest.json`
+
+## Accuracy Benchmarks (BEIR)
+
+Search quality is evaluated on real IR benchmarks from
+[BEIR](https://github.com/beir-cellar/beir) — the standard zero-shot IR
+benchmark used by MTEB and embedding-model papers:
+
+- **NFCorpus** — 3,633 medical documents, 324 test queries, graded relevance (0-3)
+- **SciFact** — 5,183 scientific abstracts, 301 test queries, binary relevance
+
+```bash
+uv run python -m pytest tests/benchmarks/test_accuracy.py -q --run-benchmarks --benchmark-disable
+```
+
+The first run downloads the datasets (~5 MB total) from the official BEIR
+distribution into `~/.cache/hybriddb-bench/`; later runs are offline. If the
+download fails, the tests skip. Metrics: nDCG@10, recall@10, precision@10,
+MRR@10, averaged over all queries, for keyword / semantic / hybrid modes,
+plus fusion-weight and embedding-model sensitivity.
 
 ## Notes
 
