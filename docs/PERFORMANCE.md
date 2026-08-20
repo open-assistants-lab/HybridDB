@@ -122,6 +122,16 @@ Fixes:
 | single `insert` (sync=True) | 166 rows/s | **313 rows/s** | 1.9× |
 | `insert_batch` + LONGTEXT + DuckDB mirror | — | 11,400 rows/s | embedding-bound |
 
+### `sync=True` now actually means synced (2026-08-20)
+
+A FULL-scale benchmark run exposed that `insert_batch(sync=True)` on a batch
+larger than the journal's per-call limit (5,000 entries) left the rest
+pending — so *every subsequent search silently paid a 35–40s journal-flush
+embedding cost* until the backlog drained. `sync=True` now drains the
+journal fully before returning (the honest cost is paid upfront, in the
+write call); `sync=False` + `process_journal()` keeps the bounded-batch
+progressive behavior for callers who want control.
+
 ## 3. Graph Performance (smoke scale: 50 nodes / 150 edges)
 
 | Operation | Mean |

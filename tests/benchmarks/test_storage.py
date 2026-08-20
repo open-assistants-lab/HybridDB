@@ -23,7 +23,7 @@ def _dir_size(path: str) -> int:
 def test_db_file_growth(benchmark, db, scale):
     """SQLite file growth for TEXT columns (no Chroma)."""
     docs = generate_docs(scale.n_docs, [{"name": "content", "type": "TEXT"}])
-    db.create_table("bench_storage", {"content": "TEXT"})
+    db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "TEXT"})
 
     def _measure():
         db.insert_batch("bench_storage", docs, sync=False)
@@ -36,7 +36,7 @@ def test_db_file_growth(benchmark, db, scale):
 def test_chroma_segment_growth(benchmark, db, scale):
     """ChromaDB segment growth for LONGTEXT columns."""
     docs = generate_docs(scale.n_docs, [{"name": "content", "type": "LONGTEXT"}])
-    db.create_table("bench_storage", {"content": "LONGTEXT"})
+    db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
     chroma_path = db._vector_path
 
     def _measure():
@@ -52,7 +52,7 @@ def test_chroma_segment_growth(benchmark, db, scale):
 def test_total_storage(benchmark, db, scale):
     """Total disk usage with LONGTEXT (SQLite + Chroma)."""
     docs = generate_docs(scale.n_docs, [{"name": "content", "type": "LONGTEXT"}])
-    db.create_table("bench_storage", {"content": "LONGTEXT"})
+    db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
 
     def _measure():
         db.insert_batch("bench_storage", docs, sync=True)
@@ -69,7 +69,7 @@ def test_total_storage(benchmark, db, scale):
 def test_chroma_bloat_check(benchmark, db, scale):
     """Check ChromaDB segment count and average size (regression catch)."""
     docs = generate_docs(scale.n_docs, [{"name": "content", "type": "LONGTEXT"}])
-    db.create_table("bench_storage", {"content": "LONGTEXT"})
+    db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
 
     def _measure():
         db.insert_batch("bench_storage", docs, sync=True)

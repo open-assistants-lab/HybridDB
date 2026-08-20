@@ -489,3 +489,20 @@ class TestFtsLikeFallback:
         assert [h[0] for h in hits] == [1]  # literal %, not a wildcard
         hits = db_no_chroma._fts_search("docs", "title", "100", 10)
         assert len(hits) == 2
+
+
+class TestSyncTrueDrainsJournal:
+    def test_insert_batch_sync_true_drains_fully(self, db_no_chroma):
+        """sync=True must leave no pending journal, even for batches larger
+        than the per-call processing limit (5000)."""
+        db_no_chroma.create_table("docs", {"title": TEXT})
+        rows = [{"title": f"t{i}"} for i in range(6_000)]
+        db_no_chroma.insert_batch("docs", rows, sync=True)
+        assert db_no_chroma._journal_count("docs") == 0
+        assert db_no_chroma.count("docs") == 6_000
+
+    def test_insert_batch_sync_false_leaves_pending(self, db_no_chroma):
+        db_no_chroma.create_table("docs", {"title": TEXT})
+        rows = [{"title": f"t{i}"} for i in range(100)]
+        db_no_chroma.insert_batch("docs", rows, sync=False)
+        assert db_no_chroma._journal_count("docs") > 0

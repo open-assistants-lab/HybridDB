@@ -176,7 +176,10 @@ class CrudMixin:
                     (table, internal_rowid, json.dumps(dict(row), default=str), now),
                 )
         if sync:
-            self._process_journal()
+            # sync=True promises the indexes are current on return; the
+            # journal processes in bounded batches, so drain fully.
+            while self._journal_count(table) > 0:
+                self._process_journal()
         return ids
 
     def update(self, table: str, row_id: int | str, data: dict, sync: bool = True) -> bool:

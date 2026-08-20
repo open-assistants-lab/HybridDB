@@ -159,9 +159,25 @@ def _generate_clustered_docs(
 
 @pytest.fixture
 def recall_db(db, scale):
-    """DB populated with clustered LONGTEXT documents for recall measurement."""
-    n_per_cluster = max(scale.n_docs // len(CLUSTER_TOPICS), 5)
+    """Clustered docs (fixed relevant set) + scale-amount distractors.
+
+    The relevant set per topic is fixed so recall@k stays meaningful at any
+    scale (with 10k docs per cluster, recall@10 is capped at 0.001); the
+    scale then adds distractors, which is the actual scaling question.
+    """
+    n_per_cluster = 10
     docs, cluster_map = _generate_clustered_docs(n_per_cluster)
+    n_distractors = max(scale.n_docs - len(docs), 0)
+    rng = random.Random(99)
+    filler_words = [
+        "the", "and", "is", "in", "of", "to", "a", "for", "with", "on",
+        "data", "system", "process", "study", "analysis", "report", "result",
+    ]
+    for i in range(n_distractors):
+        docs.append({
+            "id": f"dist_{i}",
+            "content": " ".join(rng.choices(filler_words, k=rng.randint(30, 80))),
+        })
     db.create_table("bench_recall", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
     db.insert_batch("bench_recall", docs, sync=True)
     return db, cluster_map

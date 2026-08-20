@@ -140,7 +140,14 @@ def test_sync_overhead(benchmark, db, scale):
         "category": "TEXT", "region": "TEXT", "value": "REAL", "quantity": "INTEGER",
     })
     db.insert_batch("analytics", rows, sync=False)
-    db.process_journal()
+
+    def _drain():
+        # process_journal is batch-limited; drain until empty so the
+        # mirror is fully caught up before measuring/counting
+        while db._journal_count() > 0:
+            db.process_journal()
+
+    _drain()
     # fresh rows with new ids for the incremental-write measurement
     counter = [0]
 
@@ -151,13 +158,13 @@ def test_sync_overhead(benchmark, db, scale):
 
     def _no_mirror():
         db.insert_batch("analytics", _fresh_rows(), sync=False)
-        db.process_journal()
+        _drain()
 
     db.register_duckdb_table("analytics")
 
     def _with_mirror():
         db.insert_batch("analytics", _fresh_rows(), sync=False)
-        db.process_journal()
+        _drain()
 
     _no_mirror()  # warm
     import time
@@ -166,6 +173,7 @@ def test_sync_overhead(benchmark, db, scale):
     print(f"  insert 100 rows + journal: without mirror={t_no*1000:.2f}ms  "
           f"with mirror={t_with*1000:.2f}ms  overhead={max(0, t_with-t_no)*1000:.2f}ms")
     # mirror must stay correct after the writes
+    _drain()
     assert db.olap.query("SELECT COUNT(*) c FROM analytics")[0]["c"] == db.count("analytics")
     benchmark(_with_mirror)
 
