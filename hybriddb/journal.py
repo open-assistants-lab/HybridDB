@@ -28,36 +28,59 @@ class JournalMixin:
 
     def _process_journal(self, batch_limit: int = 5000) -> int:
         table_caps: dict[str, int] = {}
+        entries: list[dict] = []
         with self._connect() as cur:
             cur.execute(
                 "SELECT app_table, COUNT(*) FROM _journal WHERE status = 'pending' GROUP BY app_table"
             )
             for row in cur.fetchall():
                 table_caps[row[0]] = row[1]
-
-        for tbl, count in table_caps.items():
-            if count > JOURNAL_CAP:
-                logger.warning("journal.overflow table=%s pending=%d", tbl, count)
-                self._hybrid_disabled[tbl] = True
-
-        with self._connect() as cur:
             cur.execute(
                 "SELECT * FROM _journal WHERE status = 'pending' ORDER BY id LIMIT ?",
                 (batch_limit,),
             )
             entries = [dict(r) for r in cur.fetchall()]
 
-        if not entries:
-            return 0
+            for tbl, count in table_caps.items():
+                if count > JOURNAL_CAP:
+                    logger.warning("journal.overflow table=%s pending=%d", tbl, count)
+                    self._hybrid_disabled[tbl] = True
 
+            if not entries:
+                return 0
+
+            self._apply_chroma_entries(entries)
+
+            row_entries = [e for e in entries if e["op"].startswith("row_")]
+            if row_entries:
+                try:
+                    self._sync_duckdb_from_journal(row_entries)
+                except Exception as e:
+                    logger.warning("duckdb.sync_failed error=%s", e)
+
+            done_ids = [e["id"] for e in entries]
+            placeholders = ",".join("?" * len(done_ids))
+            cur.execute(f"DELETE FROM _journal WHERE id IN ({placeholders})", done_ids)
+
+        for tbl in table_caps:
+            if not self._hybrid_disabled.get(tbl):
+                continue
+            remaining = self._journal_count(tbl)
+            if remaining <= JOURNAL_CAP:
+                self._hybrid_disabled.pop(tbl, None)
+                logger.info("hybrid_search_recovered table=%s remaining=%d", tbl, remaining)
+
+        return len(done_ids)
+
+    def _apply_chroma_entries(self, entries: list[dict]) -> None:
+        """Apply chroma journal entries chronologically (last-op-wins per row).
+
+        Grouping by op type (all adds, then all deletes) broke the journal
+        order: e.g. delete-then-reinsert of a TEXT-PK row (rowid reused)
+        produced duplicate ids in one upsert call (DuplicateIDError, permanent
+        journal wedge) or left Chroma with the wrong final state.
+        """
         chroma_entries = [e for e in entries if e["op"] in ("add", "update", "delete")]
-        row_entries = [e for e in entries if e["op"].startswith("row_")]
-
-        # Apply chroma ops chronologically with last-op-wins per row. Grouping
-        # by op type (all adds, then all deletes) broke the journal order:
-        # e.g. delete-then-reinsert of a TEXT-PK row (rowid reused) produced
-        # duplicate ids in one upsert call (DuplicateIDError, permanent
-        # journal wedge) or left Chroma with the wrong final state.
         final_by_collection: dict[str, dict[str, dict]] = defaultdict(dict)
         for entry in chroma_entries:
             collection_name = f"{entry['app_table']}_{entry['column_name']}"
@@ -103,27 +126,6 @@ class JournalMixin:
                 self._process_meta_update(entry)
             except Exception as e:
                 logger.warning("journal.meta_update_failed entry_id=%s error=%s", entry["id"], e)
-
-        if row_entries:
-            try:
-                self._sync_duckdb_from_journal(row_entries)
-            except Exception as e:
-                logger.warning("duckdb.sync_failed error=%s", e)
-
-        done_ids = [e["id"] for e in entries]
-        with self._connect() as cur:
-            placeholders = ",".join("?" * len(done_ids))
-            cur.execute(f"DELETE FROM _journal WHERE id IN ({placeholders})", done_ids)
-
-        for tbl in table_caps:
-            if not self._hybrid_disabled.get(tbl):
-                continue
-            remaining = self._journal_count(tbl)
-            if remaining <= JOURNAL_CAP:
-                self._hybrid_disabled.pop(tbl, None)
-                logger.info("hybrid_search_recovered table=%s remaining=%d", tbl, remaining)
-
-        return len(done_ids)
 
     def _process_meta_update(self, entry: dict) -> None:
         """Refresh Chroma metadata for a table/column after a schema change.

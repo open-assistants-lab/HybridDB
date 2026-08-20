@@ -102,6 +102,26 @@ mirror.
    as DuckDB `REAL` (float32), losing precision vs SQLite's float64
    (111.19 → 111.19000244140625). Now mapped to `DOUBLE`.
 
+### Write-path optimization (2026-08-20)
+
+Profiling `insert_batch` revealed the real bottleneck was not the journal
+writes but **opening a fresh SQLite connection per row**: `_table_meta` and
+`_get_longtext_columns` were called per row without the batch's cursor,
+each opening + closing a connection (~200k connections per 100k rows).
+
+Fixes:
+- Thread the batch cursor through `_row_to_metadata` / `_get_longtext_columns`
+  in the CRUD hot paths; hoist per-row schema lookups out of the loop
+- `insert()` now does its schema reads inside its single connection
+- `_process_journal` uses one connection end-to-end (reads + apply + delete)
+  instead of three
+
+| Path | Before | After | Speedup |
+|---|---|---|---|
+| `insert_batch` 100k rows (no embeddings) | 1,860 rows/s | **24,500 rows/s** | 13.2× |
+| single `insert` (sync=True) | 166 rows/s | **313 rows/s** | 1.9× |
+| `insert_batch` + LONGTEXT + DuckDB mirror | — | 11,400 rows/s | embedding-bound |
+
 ## 3. Graph Performance (smoke scale: 50 nodes / 150 edges)
 
 | Operation | Mean |

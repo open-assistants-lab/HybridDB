@@ -15,8 +15,8 @@ from hybriddb.utils import (
 logger = logging.getLogger("hybriddb")
 
 class CrudMixin:
-    def _row_to_metadata(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
-        meta = self._table_meta(table)
+    def _row_to_metadata(self, table: str, row: dict[str, Any], cur=None) -> dict[str, Any]:
+        meta = self._table_meta(table, cur=cur)
         if not meta:
             return {}
         result = {}
@@ -38,30 +38,29 @@ class CrudMixin:
         skip_journal_columns: set[str] | None = None,
     ) -> int | str:
         _validate_identifier(table, "table")
-        meta = self._table_meta(table)
-        if not meta:
-            raise ValueError(f"Table '{table}' not found")
-        filtered = {k: v for k, v in data.items() if k in meta["columns"]}
-        # The implicit autoincrement PK is not part of _schema metadata;
-        # honor an explicitly provided value (e.g. insert(id=100)) instead
-        # of silently dropping it.
-        pk_col = self._get_pk_column(table)
-        if pk_col not in meta["columns"] and pk_col in data:
-            filtered[pk_col] = data[pk_col]
-        columns = list(filtered.keys())
-        placeholders = ", ".join("?" * len(columns))
-        col_types = meta["columns"]
-        values = []
-        for c in columns:
-            v = filtered[c]
-            if isinstance(v, (dict, list)) and col_types.get(c) == "JSON":
-                v = json.dumps(v, default=str)
-            values.append(v)
-
         with self._connect() as cur:
+            meta = self._table_meta(table, cur=cur)
+            if not meta:
+                raise ValueError(f"Table '{table}' not found")
+            filtered = {k: v for k, v in data.items() if k in meta["columns"]}
+            # The implicit autoincrement PK is not part of _schema metadata;
+            # honor an explicitly provided value (e.g. insert(id=100)) instead
+            # of silently dropping it.
+            pk_col = self._get_pk_column(table, cur=cur)
+            if pk_col not in meta["columns"] and pk_col in data:
+                filtered[pk_col] = data[pk_col]
+            columns = list(filtered.keys())
+            placeholders = ", ".join("?" * len(columns))
+            col_types = meta["columns"]
+            values = []
+            for c in columns:
+                v = filtered[c]
+                if isinstance(v, (dict, list)) and col_types.get(c) == "JSON":
+                    v = json.dumps(v, default=str)
+                values.append(v)
+
             cur.execute(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})", values)
             internal_rowid = cur.lastrowid
-            pk_col = self._get_pk_column(table, cur=cur)
             if pk_col in filtered:
                 user_pk = filtered[pk_col]
             else:
@@ -82,9 +81,9 @@ class CrudMixin:
                 )
             row = dict(fetched)
 
-            metadata = self._row_to_metadata(table, row)
+            metadata = self._row_to_metadata(table, row, cur=cur)
             now = _now_iso()
-            for col in self._get_longtext_columns(table):
+            for col in self._get_longtext_columns(table, cur=cur):
                 if skip_journal_columns and col in skip_journal_columns:
                     continue
                 cur.execute(
@@ -130,6 +129,7 @@ class CrudMixin:
         with self._connect() as cur:
             now = _now_iso()
             pk_col = self._get_pk_column(table, cur=cur)
+            lt_cols = self._get_longtext_columns(table, cur=cur)
             for data in rows:
                 filtered = {k: v for k, v in data.items() if k in meta["columns"]}
                 if pk_col not in meta["columns"] and pk_col in data:
@@ -163,8 +163,8 @@ class CrudMixin:
                     )
                 row = dict(fetched)
                 ids.append(user_pk)
-                metadata = self._row_to_metadata(table, row)
-                for col in self._get_longtext_columns(table):
+                metadata = self._row_to_metadata(table, row, cur=cur)
+                for col in lt_cols:
                     cur.execute(
                         "INSERT INTO _journal (app_table, row_id, column_name, op, data, metadata, created_at) "
                         "VALUES (?, ?, ?, 'add', ?, ?, ?)",
@@ -238,8 +238,8 @@ class CrudMixin:
                         f"Row disappeared during update of '{table}' (rowid {internal_rowid})"
                     )
                 row = dict(fetched)
-            metadata = self._row_to_metadata(table, row)
-            lt_cols = self._get_longtext_columns(table)
+            metadata = self._row_to_metadata(table, row, cur=cur)
+            lt_cols = self._get_longtext_columns(table, cur=cur)
             if pk_changed:
                 # The row's Chroma key is the rowid (or the PK itself for
                 # INTEGER PRIMARY KEYs). Moving the PK means deleting the old
@@ -296,7 +296,7 @@ class CrudMixin:
             cur.execute(f"DELETE FROM {table} WHERE {pk_col} = ?", (row_id,))
             if cur.rowcount == 0:
                 return False
-            for col in self._get_longtext_columns(table):
+            for col in self._get_longtext_columns(table, cur=cur):
                 now = _now_iso()
                 cur.execute(
                     "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
