@@ -13,7 +13,7 @@ import statistics
 
 import pytest
 
-from hybriddb import LONGTEXT, TEXT, HybridDB, SearchMode
+from hybriddb import LONGTEXT, HybridDB, SearchMode
 from hybriddb.embedding import hash_embedding
 
 from .datasets import load_beir
