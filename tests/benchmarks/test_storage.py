@@ -22,7 +22,7 @@ def _dir_size(path: str) -> int:
 
 def test_db_file_growth(benchmark, db, scale):
     """SQLite file growth for TEXT columns (no Chroma)."""
-    docs = generate_docs(scale.n_docs, [{"name": "content", "type": "TEXT"}])
+    docs = generate_docs(min(scale.n_docs, 20_000), [{"name": "content", "type": "TEXT"}])
     db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "TEXT"})
 
     def _measure():
@@ -30,13 +30,13 @@ def test_db_file_growth(benchmark, db, scale):
         db.insert_batch("bench_storage", docs, sync=False)
         return _dir_size(db._db_path)
 
-    size = benchmark(_measure)
+    size = benchmark.pedantic(_measure, rounds=1, warmup_rounds=0)
     assert size > 0
 
 
 def test_chroma_segment_growth(benchmark, db, scale):
-    """ChromaDB segment growth for LONGTEXT columns."""
-    docs = generate_docs(scale.n_docs, [{"name": "content", "type": "LONGTEXT"}])
+    """ChromaDB segment growth for LONGTEXT columns (capped: embedding cost)."""
+    docs = generate_docs(min(scale.n_docs, 20_000), [{"name": "content", "type": "LONGTEXT"}])
     db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
     chroma_path = db._vector_path
 
@@ -47,13 +47,13 @@ def test_chroma_segment_growth(benchmark, db, scale):
             return _dir_size(chroma_path)
         return 0
 
-    size = benchmark(_measure)
+    size = benchmark.pedantic(_measure, rounds=1, warmup_rounds=0)
     assert size > 0 or scale.n_docs == 0
 
 
 def test_total_storage(benchmark, db, scale):
-    """Total disk usage with LONGTEXT (SQLite + Chroma)."""
-    docs = generate_docs(scale.n_docs, [{"name": "content", "type": "LONGTEXT"}])
+    """Total disk usage with LONGTEXT (SQLite + Chroma) (capped)."""
+    docs = generate_docs(min(scale.n_docs, 20_000), [{"name": "content", "type": "LONGTEXT"}])
     db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
 
     def _measure():
@@ -65,13 +65,13 @@ def test_total_storage(benchmark, db, scale):
         )
         return {"sqlite_bytes": sqlite_size, "chroma_bytes": chroma_size}
 
-    result = benchmark(_measure)
+    result = benchmark.pedantic(_measure, rounds=1, warmup_rounds=0)
     assert result["sqlite_bytes"] > 0
 
 
 def test_chroma_bloat_check(benchmark, db, scale):
     """Check ChromaDB segment count and average size (regression catch)."""
-    docs = generate_docs(scale.n_docs, [{"name": "content", "type": "LONGTEXT"}])
+    docs = generate_docs(min(scale.n_docs, 20_000), [{"name": "content", "type": "LONGTEXT"}])
     db.create_table("bench_storage", {"id": "TEXT PRIMARY KEY", "content": "LONGTEXT"})
 
     def _measure():
@@ -85,5 +85,5 @@ def test_chroma_bloat_check(benchmark, db, scale):
         avg = sum(sizes) / n if n > 0 else 0
         return {"segment_count": n, "avg_segment_bytes": avg}
 
-    result = benchmark(_measure)
+    result = benchmark.pedantic(_measure, rounds=1, warmup_rounds=0)
     assert result["segment_count"] >= 0

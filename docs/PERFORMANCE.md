@@ -157,6 +157,11 @@ at 1M rows; the graph scales linearly-ish with nodes/edges, with semantic
 retrieval (search_graph/PPR) and traversal as the dominant costs at 10k-node
 scale.
 
+**Clean re-run results** (after the `sync=True` fix; 100k docs): recall
+searches dropped from 28–35s (journal flush pollution) to **7–102ms** while
+passing the accuracy thresholds with 100k distractors; LONGTEXT searches:
+keyword 188ms, vector 1.3ms, hybrid 1.9ms; incremental mirror sync 128ms.
+
 ## 3. Graph Performance (smoke scale: 50 nodes / 150 edges)
 
 | Operation | Mean |
