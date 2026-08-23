@@ -1,5 +1,8 @@
 # HybridDB
 
+[![PyPI version](https://img.shields.io/pypi/v/hybriddb)](https://pypi.org/project/hybriddb/)
+[![Downloads](https://img.shields.io/pypi/dm/hybriddb)](https://pypi.org/project/hybriddb/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 > **Purposefully built for AI Agents.** HybridDB gives agents persistent, searchable memory — every conversation turn is indexed and retrievable via keyword, vector, or hybrid search. Used in production by the [Executive Assistant](https://github.com/open-assistants-lab) agent system.
 
 > **Embedded. Local. Open source.** No cloud APIs, no vector DB services, no internet connection required. Runs entirely on-device with SQLite + ChromaDB + your choice of local embedding model. Ships as a single Python package with zero external infrastructure dependencies.

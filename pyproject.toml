@@ -4,6 +4,10 @@ version = "0.5.6"
 description = "Embedded, local, open-source hybrid search for AI agents — SQLite + FTS5 + ChromaDB with self-healing journal"
 requires-python = ">=3.11"
 readme = "README.md"
+[project.urls]
+Homepage = "https://openassistants.org"
+Source = "https://github.com/open-assistants-lab/HybridDB"
+
 keywords = ["hybrid-search", "vector-search", "keyword-search", "sqlite", "chromadb", "fts5", "embeddings"]
 license = {text = "MIT"}
 authors = [
