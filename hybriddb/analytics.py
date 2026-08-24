@@ -291,6 +291,14 @@ class AnalyticsMixin:
 
         with self._db_lock:
             dk = self._duckdb_conn
+            # Idempotent attach: a previously interrupted sync can leave "src"
+            # attached (DETACH in the finally below swallows errors); mirror the
+            # defensive pre-DETACH from _full_sync_duckdb_table so one stale
+            # attachment doesn't fail every subsequent incremental sync.
+            try:
+                dk.execute("DETACH src")
+            except Exception:
+                pass
             dk.execute(f"ATTACH '{self._db_path}' AS src (TYPE sqlite)")
             try:
                 for tbl, ops in by_table_ids.items():

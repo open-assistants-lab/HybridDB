@@ -116,6 +116,23 @@ class TestDuckDBCustomPk:
 
 # ── C2: journal wedge on TEXT-PK delete + reinsert ────────────────────────
 
+class TestJournalStaleAttach:
+    def test_stale_src_attach_does_not_wedge_incremental_sync(self, db):
+        """A leftover "src" attachment (e.g. from an interrupted earlier sync)
+        must not make every subsequent incremental journal sync raise
+        BinderException: database with name "src" already exists."""
+        pytest.importorskip("duckdb")
+        db.create_table("items", {"uid": "TEXT PRIMARY KEY", "name": TEXT})
+        db.insert("items", {"uid": "a", "name": "first"})
+        # Simulate the stale state: attach under the same alias behind the sync's back.
+        db._duckdb_conn.execute(
+            f"ATTACH '{db._db_path}' AS src (TYPE sqlite)"
+        )
+        # Before the guard this raised BinderException; now it must recover.
+        db.insert("items", {"uid": "b", "name": "second"})
+        assert db.olap.query("SELECT count(*) c FROM items")[0]["c"] == 2
+
+
 class TestJournalDeleteReinsert:
     def test_text_pk_delete_reinsert_no_wedge(self, db):
         db.create_table("items", {"uid": "TEXT PRIMARY KEY", "name": TEXT, "body": LONGTEXT})
