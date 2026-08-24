@@ -1,14 +1,13 @@
 [project]
+dependencies = [
+    "chromadb>=1.5.0,<2.0",
+]
 keywords = ["hybrid-search", "vector-search", "keyword-search", "sqlite", "chromadb", "fts5", "embeddings"]
 name = "hybriddb"
 version = "0.5.7"
 description = "Embedded, local, open-source hybrid search for AI agents — SQLite + FTS5 + ChromaDB with self-healing journal"
 requires-python = ">=3.11"
 readme = "README.md"
-[project.urls]
-Homepage = "https://openassistants.org"
-Source = "https://github.com/open-assistants-lab/HybridDB"
-
 license = {text = "MIT"}
 authors = [
     {name = "Eddy Xu"},
@@ -25,9 +24,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-dependencies = [
-    "chromadb>=1.5.0,<2.0",
-]
+[project.urls]
+Homepage = "https://openassistants.org"
+Source = "https://github.com/open-assistants-lab/HybridDB"
+
+
 
 [project.optional-dependencies]
 analytics = [
