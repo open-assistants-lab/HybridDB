@@ -1,6 +1,6 @@
 [project]
 name = "hybriddb"
-version = "0.5.6"
+version = "0.5.7"
 description = "Embedded, local, open-source hybrid search for AI agents — SQLite + FTS5 + ChromaDB with self-healing journal"
 requires-python = ">=3.11"
 readme = "README.md"
