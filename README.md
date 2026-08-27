@@ -28,6 +28,35 @@ db.search("docs", "body", "how do I begin", mode="hybrid")
 db.query("docs", where="title LIKE ?", params=("%start%",))
 ```
 
+
+## Agent Memory You Can Audit (v0.6.0)
+
+Opt any table into **versioned history with a tamper-evident hash chain** —
+built for agent memory, session logs, and audit trails:
+
+```python
+from hybriddb import HybridDB, LONGTEXT, TEXT
+
+db = HybridDB("./agent_memory")
+db.create_table("memories", {"id": TEXT, "content": LONGTEXT}, versioned=True)
+db.author = "assistant"                       # recorded on every event
+
+db.upsert("memories", {"id": "m1", "content": "User prefers morning meetings"})
+db.upsert("memories", {"id": "m1", "content": "User prefers afternoon standups"})
+
+db.history("memories", key="m1")              # every version, with hashes
+db.diff("docs", from_seq=1, to_seq=2)         # what changed between two points
+db.as_of("memories", seq=3)                   # what the agent knew at seq 3
+
+cp = db.checkpoint("memories", "before-cleanup")   # named restore point
+db.rollback("memories", checkpoint="before-cleanup")  # rewind — nothing erased
+db.verify_chain("memories")                   # -> {"valid": True, ...} tamper-evident
+```
+
+History is append-only: rollback re-applies state as *new* versions, so the
+audit trail stays complete. `verify_chain()` detects any direct tampering
+with the history store. See [docs/API.md](docs/API.md#versioned-tables).
+
 ## Why HybridDB?
 
 Every serious project that needs **both** keyword and semantic search ends up wiring SQLite + FTS5 + ChromaDB together. You handle schema creation, FTS5 triggers, ChromaDB collection management, keeping them in sync, recovering from crashes, rebuilding indexes...

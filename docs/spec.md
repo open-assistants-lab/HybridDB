@@ -660,6 +660,43 @@ CREATE TABLE IF NOT EXISTS _schema (
 
 ---
 
+
+## 6b. Versioned Tables (v0.6.0)
+
+Any table can opt into **append-only, hash-chained history**: a shadow
+`{table}__history` table records a post-image of every insert/update and a
+tombstone (with the last known row) for every delete.
+
+- **Hash chain:** `event_hash = SHA256(prev_hash | op | pk | row_json)`,
+  computed by the engine on every write. `verify_chain()` recomputes the
+  chain and detects any direct tampering with the history store.
+- **Time travel:** `as_of(seq)` reconstructs table state at any log position
+  (latest post-image per pk, tombstones excluded). `diff(from_seq, to_seq)`
+  reports added/removed/changed rows. `history(key)` shows every version of
+  a row.
+- **Checkpoints & rollback:** `checkpoint(label)` tags a log position;
+  `rollback()` re-applies historical state as *new* versions — the chain
+  never rewinds, so the audit trail stays complete. Rollback of append-heavy
+  tables is cheap (Chroma deletions); update-heavy tables re-embed restored
+  LONGTEXT rows.
+- **Retention:** `archive()` exports current + history (jsonl/parquet);
+  `prune()` deletes a contiguous *prefix* of history and records a chain
+  anchor so the retained tail remains verifiable.
+- **Design choice — post-images + tombstones** (vs pre-images): makes
+  `as_of` a single indexed query and `diff` a last-wins comparison, with no
+  replay.
+- **Exclusions:** history tables are engine-managed — not in `_schema`, not
+  mirrored to DuckDB, not graph-synced, not FTS/Chroma indexed. The main
+  table remains the current state, so hybrid search is unchanged.
+- **Schema changes** (`add_column`/`drop_column`/`rename_column`) are
+  rejected on versioned tables so stored post-images keep matching the
+  table schema.
+- **Measured write overhead:** ~13% at 100k rows (opt-in per table).
+
+Full design: `docs/specs/2026-08-26-versioned-tables-v0.6.0.md`.
+API: [docs/API.md — Versioned Tables](API.md#versioned-tables).
+
+
 ## 7. Search API
 
 ### search() — Single column search

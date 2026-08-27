@@ -267,10 +267,19 @@ Semantics:
   versions — nothing is erased, so the audit trail stays complete.
 - `verify_chain()` detects any direct modification of the history store.
 - Pruning records a chain anchor; the retained tail stays verifiable.
+  Rewind depth is bounded by retention: you cannot roll back past a pruned
+  boundary.
+- Rollback cost depends on the workload: append-heavy tables pay only
+  Chroma deletions (cheap); update-heavy tables re-embed restored
+  LONGTEXT rows (O(changed rows)).
 - Schema changes (`add_column`/`drop_column`/`rename_column`) are rejected
   on versioned tables.
+- History tables are engine-managed: excluded from `list_tables()`, DuckDB
+  mirroring, graph sync, and FTS/Chroma indexing.
 - Write overhead is ~13% (measured at 100k rows). `fork` is planned but
-  deferred.
+  deferred — checkpoint/rollback covers the rewind workflow.
+
+`upsert()` also works on non-versioned tables (plain insert-or-update).
 
 ## OLAP API
 
