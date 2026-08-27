@@ -184,8 +184,8 @@ class SchemaMixin:
         if not has_custom_pk:
             if "id" in columns:
                 raise ValueError(
-                    f"Column 'id' conflicts with the implicit primary key — declare it as "
-                    f"'id ... PRIMARY KEY' or rename the column"
+                    "Column 'id' conflicts with the implicit primary key — declare it as "
+                    "'id ... PRIMARY KEY' or rename the column"
                 )
             col_defs.append("id INTEGER PRIMARY KEY AUTOINCREMENT")
 
