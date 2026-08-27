@@ -5,7 +5,7 @@ Graph capabilities: SQLite-backed nodes/edges, recursive CTE traversal, NetworkX
 Analytics: DuckDB columnar store synced via unified journal for fast OLAP queries.
 """
 
-__version__ = "0.5.8"
+__version__ = "0.6.0"
 
 from hybriddb.db import HybridDB
 from hybriddb.embedding import default_embedding_fn

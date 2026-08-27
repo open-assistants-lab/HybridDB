@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.6.0] — 2026-08-26
+
+### Added
+
+**Versioned tables — git-like primitives with a tamper-evident hash chain**
+(docs/specs/2026-08-26-versioned-tables-v0.6.0.md):
+
+- `create_table(..., versioned=True, hash_chain=True)` — every
+  insert/update/delete appends a post-image (or delete tombstone) to a
+  shadow `__history` table with `SHA256(prev_hash | op | pk | row_json)`
+  chain links computed by the engine. FTS5/Chroma keep indexing current
+  data only — hybrid search is unchanged.
+- `upsert(table, data)` — insert-or-update; history captures the event
+  automatically on versioned tables.
+- `log(table)` / `history(table, key)` — change log and per-row version
+  history.
+- `as_of(table, seq)` — point-in-time read; `diff(table, from_seq, to_seq)`
+  — added/removed/changed rows between two log positions.
+- `checkpoint(table, label)` / `rollback(table, checkpoint=|at_seq=)` —
+  named restore points; rollback re-applies historical state as *new*
+  versions (the chain never rewinds, so the audit trail stays complete),
+  and is cheap for append-heavy tables (Chroma deletions, not re-embeds).
+- `verify_chain(table)` — recomputes the chain and reports the first
+  broken link; detects direct tampering with the history store.
+- `archive(table, path, format="jsonl"|"parquet")` and
+  `prune(table, before_seq=|checkpoint=)` — retention with **chain
+  anchors** so pruning keeps `verify_chain` valid for the retained tail.
+- `db.author` — optional author recorded per history event.
+- Guardrails: schema changes (`add/drop/rename_column`) are rejected on
+  versioned tables; `__history` table names are reserved; history tables
+  are excluded from `list_tables`, DuckDB mirroring, and graph sync.
+- Measured write overhead for versioned tables: ~13%
+  (20.6k → 18.0k rows/s at 100k rows).
+- `fork` is deferred to a later release (checkpoint/rollback covers the
+  agent-memory rewind workflow; fork is a materialized copy with full
+  re-embedding).
+
 ## [0.5.6] — 2026-08-20
 
 ### Fixed

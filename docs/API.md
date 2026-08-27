@@ -236,6 +236,42 @@ synced = db.graph.sync_graph_nodes()
 
 The namespaced `db.graph` facade exists for discoverability. Direct methods such as `db.add_node()` and `db.shortest_path()` remain supported.
 
+## Versioned Tables
+
+Opt-in per table. Versioned tables keep an append-only, hash-chained history
+(`{table}__history`) of every insert/update/delete, while the main table
+stays the current state — FTS5 and Chroma keep indexing current data only.
+
+```python
+db.create_table("docs", {"id": TEXT, "body": LONGTEXT}, versioned=True, hash_chain=True)
+db.author = "agent-1"                       # optional, recorded per event
+
+db.upsert("docs", {"id": 1, "body": "v1"})  # insert-or-update
+db.upsert("docs", {"id": 1, "body": "v2"})
+
+db.log("docs")                              # change log, newest first
+db.history("docs", key=1)                   # every version of a row
+db.diff("docs", from_seq=1, to_seq=2)       # added/removed/changed
+db.as_of("docs", seq=1)                     # point-in-time read
+
+cp = db.checkpoint("docs", "before-edit")
+db.rollback("docs", checkpoint="before-edit")   # state re-applied as new versions
+db.verify_chain("docs")                     # -> {"valid": True, "checked": N, ...}
+db.archive("docs", "exports/docs", format="parquet")  # or "jsonl"
+db.prune("docs", before_seq=5)              # retention; keeps the chain verifiable
+```
+
+Semantics:
+
+- History is **append-only**: rollback records the restored state as new
+  versions — nothing is erased, so the audit trail stays complete.
+- `verify_chain()` detects any direct modification of the history store.
+- Pruning records a chain anchor; the retained tail stays verifiable.
+- Schema changes (`add_column`/`drop_column`/`rename_column`) are rejected
+  on versioned tables.
+- Write overhead is ~13% (measured at 100k rows). `fork` is planned but
+  deferred.
+
 ## OLAP API
 
 DuckDB analytics are optional. Install with:

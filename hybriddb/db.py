@@ -29,6 +29,7 @@ from hybriddb.export_import import ExportImportMixin
 from hybriddb.facades import AnalyticsAPI, GraphAPI
 from hybriddb.graph import GraphMixin
 from hybriddb.journal import JournalMixin
+from hybriddb.versioning import VersioningMixin
 from hybriddb.maintenance import MaintenanceMixin
 from hybriddb.schema import SchemaMixin
 from hybriddb.search import SearchMixin
@@ -60,6 +61,7 @@ class HybridDB(
     CrudMixin,
     SearchMixin,
     JournalMixin,
+    VersioningMixin,
     GraphMixin,
     AnalyticsMixin,
     MaintenanceMixin,
@@ -107,6 +109,7 @@ class HybridDB(
         self._max_chroma_index_gb = max_chroma_index_gb
         self._db_lock = threading.RLock()
         self._hybrid_disabled: dict[str, bool] = {}
+        self.author: str | None = None  # recorded in versioned-table history
         self.graph = GraphAPI(self)
         self.olap = AnalyticsAPI(self)
 
@@ -187,6 +190,7 @@ class HybridDB(
             """)
 
         self._init_graph_tables()
+        self._init_versioning_tables()
 
 
     def _init_chroma(self, force: bool = False) -> None:

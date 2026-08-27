@@ -13,7 +13,7 @@ uv run python -m pytest -q
 Expected shape:
 
 ```text
-180 passed, 48 skipped
+214 passed, 48 skipped
 ```
 
 The skipped tests are benchmark tests under `tests/benchmarks/`.

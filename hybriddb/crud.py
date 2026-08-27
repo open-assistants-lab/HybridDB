@@ -83,6 +83,7 @@ class CrudMixin:
 
             metadata = self._row_to_metadata(table, row, cur=cur)
             now = _now_iso()
+            versioned, hash_chain = self._versioned_state(cur, table)
             for col in self._get_longtext_columns(table, cur=cur):
                 if skip_journal_columns and col in skip_journal_columns:
                     continue
@@ -96,9 +97,34 @@ class CrudMixin:
                 "VALUES (?, ?, 'row_add', ?, ?)",
                 (table, internal_rowid, json.dumps(dict(row), default=str), now),
             )
+            if versioned:
+                self._capture_history(cur, table, "insert", user_pk, row, hash_chain=hash_chain)
         if sync:
             self._process_journal()
         return user_pk if user_pk is not None else 0
+
+    def upsert(self, table: str, data: dict, sync: bool = True) -> int | str:
+        """Insert the row if its primary key is absent, else update it.
+
+        On versioned tables the prior state is captured in history
+        automatically (insert records the new row; update records the
+        new state as a post-image).
+
+        Returns the primary key value.
+        """
+        _validate_identifier(table, "table")
+        with self._connect() as cur:
+            pk_col = self._get_pk_column(table, cur=cur)
+        pk_val = data.get(pk_col)
+        if pk_val is None:
+            raise ValueError(
+                f"upsert requires the primary key column '{pk_col}' in data"
+            )
+        if self.get(table, pk_val) is None:
+            self.insert(table, data, sync=sync)
+        else:
+            self.update(table, pk_val, data, sync=sync)
+        return pk_val
 
     def row_to_metadata(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
         _validate_identifier(table, "table")
@@ -130,6 +156,8 @@ class CrudMixin:
             now = _now_iso()
             pk_col = self._get_pk_column(table, cur=cur)
             lt_cols = self._get_longtext_columns(table, cur=cur)
+            versioned, hash_chain = self._versioned_state(cur, table)
+            history_prev: str | None = None  # chain head, maintained in-memory
             for data in rows:
                 filtered = {k: v for k, v in data.items() if k in meta["columns"]}
                 if pk_col not in meta["columns"] and pk_col in data:
@@ -175,6 +203,11 @@ class CrudMixin:
                     "VALUES (?, ?, 'row_add', ?, ?)",
                     (table, internal_rowid, json.dumps(dict(row), default=str), now),
                 )
+                if versioned:
+                    history_prev = self._capture_history(
+                        cur, table, "insert", user_pk, row,
+                        hash_chain=hash_chain, prev_hash=history_prev,
+                    )
         if sync:
             # sync=True promises the indexes are current on return; the
             # journal processes in bounded batches, so drain fully.
@@ -243,6 +276,7 @@ class CrudMixin:
                 row = dict(fetched)
             metadata = self._row_to_metadata(table, row, cur=cur)
             lt_cols = self._get_longtext_columns(table, cur=cur)
+            versioned, hash_chain = self._versioned_state(cur, table)
             if pk_changed:
                 # The row's Chroma key is the rowid (or the PK itself for
                 # INTEGER PRIMARY KEYs). Moving the PK means deleting the old
@@ -285,6 +319,17 @@ class CrudMixin:
                     "VALUES (?, ?, 'row_update', ?, ?)",
                     (table, internal_rowid, json.dumps(dict(row), default=str), now),
                 )
+            if versioned:
+                # post-image under the row's current pk; a pk change also
+                # tombstones the old pk so as_of/history stay correct
+                if pk_changed:
+                    self._capture_history(
+                        cur, table, "delete", row_id, {**row, pk_col: row_id},
+                        hash_chain=hash_chain,
+                    )
+                self._capture_history(
+                    cur, table, "update", row[pk_col], row, hash_chain=hash_chain,
+                )
         if sync:
             self._process_journal()
         return True
@@ -296,6 +341,13 @@ class CrudMixin:
             internal_rowid = self._resolve_internal_rowid(cur, table, row_id, pk_col)
             if internal_rowid is None:
                 return False
+            versioned, hash_chain = self._versioned_state(cur, table)
+            deleted_row = None
+            if versioned:
+                fetched = cur.execute(
+                    f"SELECT * FROM {table} WHERE {pk_col} = ?", (row_id,)
+                ).fetchone()
+                deleted_row = dict(fetched) if fetched is not None else None
             cur.execute(f"DELETE FROM {table} WHERE {pk_col} = ?", (row_id,))
             if cur.rowcount == 0:
                 return False
@@ -312,6 +364,12 @@ class CrudMixin:
                 "VALUES (?, ?, 'row_delete', ?, ?)",
                 (table, internal_rowid, now, str(row_id)),
             )
+            if versioned and deleted_row is not None:
+                # tombstone carrying the last known row state
+                self._capture_history(
+                    cur, table, "delete", deleted_row.get(pk_col, row_id),
+                    deleted_row, hash_chain=hash_chain,
+                )
         if sync:
             self._process_journal()
         return True

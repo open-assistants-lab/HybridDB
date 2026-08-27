@@ -13,6 +13,10 @@ from hybriddb.utils import (
     _now_iso,
     _validate_identifier,
 )
+from hybriddb.versioning import (
+    GENESIS_HASH,
+    HISTORY_SUFFIX,
+)
 
 logger = logging.getLogger("hybriddb")
 
@@ -162,16 +166,27 @@ class SchemaMixin:
             self._drop_fts5(cur, table, col)
             self._create_fts5(cur, table, col, rowid_col)
 
-    def create_table(self, table: str, columns: dict[str, str | Column]) -> None:
+    def create_table(self, table: str, columns: dict[str, str | Column],
+                     versioned: bool = False, hash_chain: bool = True) -> None:
         _validate_identifier(table, "table")
         if "_fts_" in table:
             raise ValueError(
                 f"Table name '{table}' contains '_fts_' which conflicts with FTS5 naming convention"
             )
+        if table.endswith(HISTORY_SUFFIX):
+            raise ValueError(
+                f"Table name '{table}' ends with '{HISTORY_SUFFIX}' which is reserved "
+                f"for versioned-table history"
+            )
         col_defs: list[str] = []
         parsed: dict[str, str] = {}
         has_custom_pk = any("PRIMARY KEY" in _column_spec(spec).upper() for name, spec in columns.items())
         if not has_custom_pk:
+            if "id" in columns:
+                raise ValueError(
+                    f"Column 'id' conflicts with the implicit primary key — declare it as "
+                    f"'id ... PRIMARY KEY' or rename the column"
+                )
             col_defs.append("id INTEGER PRIMARY KEY AUTOINCREMENT")
 
         for col_name, col_spec in columns.items():
@@ -226,8 +241,33 @@ class SchemaMixin:
             for col in self._get_longtext_columns_from_parsed(parsed):
                 self._get_collection(f"{table}_{col}")
             self._save_table_meta(cur, table, parsed)
+            if versioned:
+                self._enable_versioning(cur, table, hash_chain)
 
         self._refresh_duckdb_table_if_registered(table)
+
+    def _enable_versioning(self, cur, table: str, hash_chain: bool) -> None:
+        """Register a table as versioned: create the shadow history table and
+        backfill existing rows as insert events (so as_of/history cover rows
+        that pre-date versioning)."""
+        cur.execute(
+            "INSERT OR IGNORE INTO _versioned_tables (table_name, hash_chain, created_at) "
+            "VALUES (?, ?, ?)",
+            (table, int(hash_chain), _now_iso()),
+        )
+        self._create_history_table(cur, table)
+        # backfill: history for rows that pre-date this call
+        existing = cur.execute(f"SELECT * FROM {table}").fetchall()
+        if not existing:
+            return
+        pk_col = self._get_pk_column(table, cur=cur)
+        prev = GENESIS_HASH
+        for r in existing:
+            row = dict(r)
+            prev = self._capture_history(
+                cur, table, "insert", row[pk_col], row,
+                hash_chain=hash_chain, prev_hash=prev,
+            )
 
     @staticmethod
     def _get_longtext_columns_from_parsed(parsed: dict[str, str]) -> list[str]:
@@ -236,6 +276,11 @@ class SchemaMixin:
     def add_column(self, table: str, column: str, col_type: str) -> None:
         _validate_identifier(table, "table")
         _validate_identifier(column, "column")
+        if self.is_versioned(table):
+            raise ValueError(
+                f"Table '{table}' is versioned; schema changes on versioned "
+                f"tables are not supported (disable versioning first)"
+            )
         meta = self._table_meta(table)
         if not meta:
             raise ValueError(f"Table '{table}' not found")
@@ -260,6 +305,11 @@ class SchemaMixin:
     def drop_column(self, table: str, column: str) -> None:
         _validate_identifier(table, "table")
         _validate_identifier(column, "column")
+        if self.is_versioned(table):
+            raise ValueError(
+                f"Table '{table}' is versioned; schema changes on versioned "
+                f"tables are not supported (disable versioning first)"
+            )
         meta = self._table_meta(table)
         if not meta or column not in meta["columns"]:
             raise ValueError(f"Column '{column}' not found in table '{table}'")
@@ -313,6 +363,11 @@ class SchemaMixin:
         _validate_identifier(table, "table")
         _validate_identifier(old_name, "column")
         _validate_identifier(new_name, "column")
+        if self.is_versioned(table):
+            raise ValueError(
+                f"Table '{table}' is versioned; schema changes on versioned "
+                f"tables are not supported (disable versioning first)"
+            )
         meta = self._table_meta(table)
         if not meta or old_name not in meta["columns"]:
             raise ValueError(f"Column '{old_name}' not found in table '{table}'")

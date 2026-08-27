@@ -4,7 +4,7 @@ dependencies = [
 ]
 keywords = ["hybrid-search", "vector-search", "keyword-search", "sqlite", "chromadb", "fts5", "embeddings"]
 name = "hybriddb"
-version = "0.5.8"
+version = "0.6.0"
 description = "Embedded, local, open-source hybrid search for AI agents — SQLite + FTS5 + ChromaDB with self-healing journal"
 requires-python = ">=3.11"
 readme = "README.md"

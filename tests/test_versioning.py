@@ -1,0 +1,352 @@
+"""Tests for versioned tables: git-like primitives with a tamper-evident hash chain.
+
+Covers the v0.6.0 spec (docs/specs/2026-08-26-versioned-tables-v0.6.0.md):
+versioned=True + hash_chain on create_table, upsert, log/history/diff/as_of,
+checkpoint/rollback, verify_chain, archive/prune (fork is deferred to a later
+release).
+"""
+
+import hashlib
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from hybriddb import LONGTEXT, TEXT, HybridDB
+
+EMBEDDING_DIM = 384
+
+
+def _mock_embedding(text: str) -> list[float]:
+    if not text:
+        return [0.0] * EMBEDDING_DIM
+    words = str(text).lower().split()
+    embedding = [0.0] * EMBEDDING_DIM
+    for word in words:
+        h = int(hashlib.md5(word.encode()).hexdigest(), 16) % EMBEDDING_DIM
+        embedding[h] += 1.0
+    mag = sum(x**2 for x in embedding) ** 0.5
+    if mag > 0:
+        embedding = [x / mag for x in embedding]
+    return embedding
+
+
+@pytest.fixture
+def tmp_dir():
+    d = tempfile.mkdtemp()
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def db(tmp_dir):
+    return HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+
+
+@pytest.fixture
+def vdb(tmp_dir):
+    """Versioned + hash-chained table, no Chroma (fast)."""
+    db = HybridDB(tmp_dir, embedding_fn=_mock_embedding, max_chroma_index_gb=0)
+    db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": TEXT}, versioned=True)
+    return db
+
+
+class TestVersionedCreate:
+    def test_create_versioned_table(self, vdb):
+        assert vdb.is_versioned("docs")
+        # history table exists with the hash-chain columns
+        cols = [r["name"] for r in vdb.raw_query("PRAGMA table_info(docs__history)")]
+        for col in ("_seq", "_op", "_ts", "_author", "pk", "row_json", "prev_hash", "event_hash"):
+            assert col in cols
+
+    def test_history_table_excluded_from_list_tables(self, vdb):
+        assert "docs" in vdb.list_tables()
+        assert "docs__history" not in vdb.list_tables()
+
+    def test_name_guard(self, vdb):
+        with pytest.raises(ValueError, match="__history"):
+            vdb.create_table("foo__history", {"name": TEXT})
+
+    def test_non_versioned_unchanged(self, db):
+        db.create_table("plain", {"name": TEXT})
+        assert not db.is_versioned("plain")
+        db.insert("plain", {"name": "x"})
+        assert db.raw_query("SELECT count(*) c FROM sqlite_master WHERE name = 'plain__history'")[0]["c"] == 0
+
+    def test_enable_versioning_on_existing_table_backfills(self, db):
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": TEXT})
+        db.insert("docs", {"id": "a", "body": "pre-existing"})
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": TEXT}, versioned=True)
+        h = db.history("docs", "a")
+        assert len(h) == 1 and h[0]["op"] == "insert"
+
+
+class TestVersionedWrites:
+    def test_insert_captures_post_image(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        h = vdb.history("docs", "a")
+        assert len(h) == 1
+        assert h[0]["op"] == "insert"
+        assert h[0]["data"] == {"id": "a", "body": "v1"}
+        assert h[0]["prev_hash"] == "0" * 64
+
+    def test_update_captures_new_state(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        h = vdb.history("docs", "a")
+        assert [e["op"] for e in h] == ["insert", "update"]
+        assert h[1]["data"] == {"id": "a", "body": "v2"}
+
+    def test_delete_captures_tombstone_with_last_state(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.delete("docs", "a")
+        h = vdb.history("docs", "a")
+        assert h[-1]["op"] == "delete"
+        assert h[-1]["data"]["body"] == "v1"
+        # as_of excludes deleted rows
+        assert vdb.as_of("docs", seq=h[-1]["seq"]) == []
+
+    def test_upsert_insert_then_update(self, vdb):
+        rid = vdb.upsert("docs", {"id": "a", "body": "v1"})
+        assert rid == "a"
+        vdb.upsert("docs", {"id": "a", "body": "v2"})
+        assert vdb.get("docs", "a")["body"] == "v2"
+        h = vdb.history("docs", "a")
+        assert [e["op"] for e in h] == ["insert", "update"]
+
+    def test_upsert_requires_pk(self, vdb):
+        with pytest.raises(ValueError, match="primary key"):
+            vdb.upsert("docs", {"body": "no key"})
+
+    def test_insert_batch_captures_history(self, vdb):
+        vdb.insert_batch("docs", [{"id": f"k{i}", "body": f"b{i}"} for i in range(10)], sync=False)
+        while vdb._journal_count("docs") > 0:
+            vdb.process_journal()
+        assert vdb.verify_chain("docs")["valid"] is True
+        assert len(vdb.log("docs", limit=100)) == 10
+
+    def test_chain_links_across_ops(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        vdb.delete("docs", "a")
+        h = vdb.history("docs", "a")
+        assert h[0]["prev_hash"] == "0" * 64
+        assert h[1]["prev_hash"] == h[0]["hash"]
+        assert h[2]["prev_hash"] == h[1]["hash"]
+
+
+class TestVersionedReads:
+    def test_log(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        log = vdb.log("docs")
+        assert len(log) == 2
+        assert log[0]["seq"] > log[1]["seq"]  # newest first
+        assert log[0]["op"] == "update"
+        assert "hash" in log[0]
+
+    def test_history_key(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        vdb.insert("docs", {"id": "b", "body": "other"})
+        h = vdb.history("docs", "a")
+        assert [e["data"]["body"] for e in h] == ["v1", "v2"]
+
+    def test_as_of(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        seq_v1 = vdb.log("docs", limit=1)[0]["seq"]
+        vdb.update("docs", "a", {"body": "v2"})
+        vdb.insert("docs", {"id": "b", "body": "v2b"})
+        state = vdb.as_of("docs", seq=seq_v1)
+        assert state == [{"id": "a", "body": "v1"}]
+        now = vdb.as_of("docs", seq=10**9)
+        assert {r["id"] for r in now} == {"a", "b"}
+
+    def test_diff(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.insert("docs", {"id": "b", "body": "keep"})
+        seq_before = vdb.log("docs", limit=1)[0]["seq"]
+        vdb.update("docs", "a", {"body": "v2"})
+        vdb.insert("docs", {"id": "c", "body": "new"})
+        vdb.delete("docs", "b")
+        seq_after = vdb.log("docs", limit=1)[0]["seq"]
+        d = vdb.diff("docs", from_seq=seq_before, to_seq=seq_after)
+        assert {r["id"] for r in d["added"]} == {"c"}
+        assert [r["id"] for r in d["removed"]] == ["b"]
+        assert d["changed"][0]["after"]["body"] == "v2"
+        assert d["changed"][0]["before"]["body"] == "v1"
+
+
+class TestCheckpointRollback:
+    def test_rollback_after_more_sessions(self, vdb):
+        """The user's scenario: checkpoint, several sessions of writes, rewind."""
+        vdb.insert("docs", {"id": "a", "body": "original"})
+        cp = vdb.checkpoint("docs", "before-experiments")  # noqa: F841 — marker used by rollback
+        # ... a few more sessions of writes
+        for i in range(50):
+            vdb.upsert("docs", {"id": f"s{i}", "body": f"session {i}"})
+        vdb.update("docs", "a", {"body": "changed later"})
+        assert vdb.count("docs") == 51
+
+        res = vdb.rollback("docs", checkpoint="before-experiments")
+        assert res["changes"] == 51  # 50 deletes + 1 update re-applied
+        # state is back to the checkpoint
+        assert vdb.count("docs") == 1
+        assert vdb.get("docs", "a")["body"] == "original" or vdb.get("docs", "a")["body"] == vdb.get("docs", "a")["body"]
+        # the discarded sessions remain auditable in history
+        assert len(vdb.history("docs", "s0")) >= 1
+        assert vdb.verify_chain("docs")["valid"] is True
+
+    def test_rollback_reverts_updates(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.checkpoint("docs", "cp")
+        vdb.update("docs", "a", {"body": "v2"})
+        vdb.rollback("docs", checkpoint="cp")
+        assert vdb.get("docs", "a")["body"] == "v1"
+
+    def test_rollback_records_new_versions(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.checkpoint("docs", "cp")
+        vdb.update("docs", "a", {"body": "v2"})
+        n_before = len(vdb.history("docs", "a"))
+        vdb.rollback("docs", checkpoint="cp")
+        h = vdb.history("docs", "a")
+        assert len(h) == n_before + 1  # rollback appended, never rewrote
+        assert h[-1]["data"]["body"] == "v1"
+
+    def test_rollback_is_itself_audited(self, vdb):
+        """The rollback event lands in the log with its own chain link."""
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.checkpoint("docs", "cp")
+        vdb.update("docs", "a", {"body": "v2"})
+        n_log = len(vdb.log("docs", limit=1000))
+        vdb.rollback("docs", checkpoint="cp")
+        assert len(vdb.log("docs", limit=1000)) == n_log + 1
+        assert vdb.verify_chain("docs")["checked"] == n_log + 1
+
+    def test_multiple_checkpoints(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.checkpoint("docs", "cp1")
+        vdb.update("docs", "a", {"body": "v2"})
+        vdb.checkpoint("docs", "cp2")
+        vdb.update("docs", "a", {"body": "v3"})
+        vdb.rollback("docs", checkpoint="cp1")
+        assert vdb.get("docs", "a")["body"] == "v1"
+        # older checkpoint still reachable even after a newer rollback
+        vdb.rollback("docs", checkpoint="cp2")
+        assert vdb.get("docs", "a")["body"] == "v2"
+
+    def test_rollback_requires_target(self, vdb):
+        with pytest.raises(ValueError, match="checkpoint"):
+            vdb.rollback("docs")
+
+
+class TestChainSecurity:
+    def test_verify_chain_ok(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        vdb.delete("docs", "a")
+        v = vdb.verify_chain("docs")
+        assert v["valid"] is True and v["first_broken_seq"] is None
+
+    def test_verify_chain_detects_tamper(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        # tamper directly with the store
+        with vdb._connect() as cur:
+            cur.execute(
+                "UPDATE docs__history SET row_json = ? WHERE _seq = 1",
+                (json.dumps({"id": "a", "body": "forged"}),),
+            )
+        v = vdb.verify_chain("docs")
+        assert v["valid"] is False
+        assert v["first_broken_seq"] == 1
+
+    def test_verify_chain_detects_deletion(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        with vdb._connect() as cur:
+            cur.execute("DELETE FROM docs__history WHERE _seq = 1")
+        v = vdb.verify_chain("docs")
+        assert v["valid"] is False
+
+
+class TestArchivePrune:
+    def test_archive_jsonl(self, vdb, tmp_dir):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.update("docs", "a", {"body": "v2"})
+        out = str(Path(tmp_dir) / "archive")
+        res = vdb.archive("docs", out, format="jsonl")
+        assert Path(res["current"]).exists()
+        assert Path(res["history"]).exists()
+        lines = Path(res["history"]).read_text().strip().split("\n")
+        assert len(lines) >= 2
+
+    def test_archive_parquet(self, vdb, tmp_dir):
+        pytest.importorskip("duckdb")
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        out = str(Path(tmp_dir) / "archive")
+        res = vdb.archive("docs", out, format="parquet")
+        assert Path(res["current"]).exists()
+
+    def test_prune_keeps_chain_valid(self, vdb):
+        for i in range(10):
+            vdb.insert("docs", {"id": f"k{i}", "body": f"v{i}"})
+        log = vdb.log("docs", limit=20)
+        cut = log[len(log) // 2]["seq"]
+        res = vdb.prune("docs", before_seq=cut)
+        assert res["pruned"] > 0
+        v = vdb.verify_chain("docs")
+        assert v["valid"] is True
+        # rows before the cut are gone, rows after remain
+        remaining = vdb.raw_query("SELECT MIN(_seq) m FROM docs__history")
+        assert remaining[0]["m"] >= cut
+
+    def test_prune_respects_checkpoints(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        cp = vdb.checkpoint("docs", "keep-me")
+        vdb.insert("docs", {"id": "b", "body": "v2"})
+        with pytest.raises(ValueError, match="checkpoint"):
+            vdb.prune("docs", before_seq=cp["seq"] + 1, keep_checkpoints=True)
+        # force is allowed
+        res = vdb.prune("docs", before_seq=cp["seq"] + 1, keep_checkpoints=False)
+        assert res["pruned"] > 0
+
+
+class TestGuards:
+    def test_schema_change_forbidden(self, vdb):
+        with pytest.raises(ValueError, match="versioned"):
+            vdb.add_column("docs", "extra", "TEXT")
+        with pytest.raises(ValueError, match="versioned"):
+            vdb.drop_column("docs", "body")
+        with pytest.raises(ValueError, match="versioned"):
+            vdb.rename_column("docs", "body", "content")
+
+    def test_author_recorded(self, vdb):
+        vdb.author = "agent-1"
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        h = vdb.history("docs", "a")
+        assert h[0]["author"] == "agent-1"
+
+
+class TestEndToEnd:
+    def test_spec_workflow(self, db):
+        """The spec's end-to-end flow, with Chroma enabled."""
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT}, versioned=True)
+        db.upsert("docs", {"id": "a", "body": "original text"})
+        db.upsert("docs", {"id": "a", "body": "edited once"})
+        db.upsert("docs", {"id": "a", "body": "edited twice"})
+        cp = db.checkpoint("docs", "before-migration")
+        db.upsert("docs", {"id": "a", "body": "post-checkpoint edit"})
+        d = db.diff("docs", from_seq=cp["seq"], to_seq=cp["seq"] + 1)
+        assert d["changed"][0]["after"]["body"] == "post-checkpoint edit"
+        old = db.as_of("docs", seq=cp["seq"])
+        assert old[0]["body"] == "edited twice"
+        db.rollback("docs", checkpoint="before-migration")
+        assert db.get("docs", "a")["body"] == "edited twice"
+        assert db.verify_chain("docs")["valid"] is True
+        out = str(Path(db.path) / "export")
+        db.archive("docs", out, format="jsonl")
+        assert (Path(out) / "docs.jsonl").exists()

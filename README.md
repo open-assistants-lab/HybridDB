@@ -41,6 +41,7 @@ HybridDB does all of that once, done right.
 | ChromaDB semantic/vector search with HNSW | ✅ |
 | Hybrid search (RRF fusion of keyword + semantic) | ✅ |
 | DuckDB columnar analytics (optional) | ✅ |
+| Versioned tables (tamper-evident history, time travel) | ✅ |
 | NetworkX graph algorithms (optional) | ✅ |
 | Recency-weighted scoring | ✅ |
 | Schema management (create, add/drop/rename columns) | ✅ |
