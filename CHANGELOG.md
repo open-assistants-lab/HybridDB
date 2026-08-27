@@ -31,11 +31,68 @@
 - Guardrails: schema changes (`add/drop/rename_column`) are rejected on
   versioned tables; `__history` table names are reserved; history tables
   are excluded from `list_tables`, DuckDB mirroring, and graph sync.
+- Creating a table with an `id` column that lacks `PRIMARY KEY` now raises
+  a clear error (it previously collided with the implicit auto-increment
+  `id`, surfacing as a cryptic `duplicate column name` from SQLite).
+- `scripts/publish.sh` — token-prompting release upload helper.
 - Measured write overhead for versioned tables: ~13%
   (20.6k → 18.0k rows/s at 100k rows).
 - `fork` is deferred to a later release (checkpoint/rollback covers the
   agent-memory rewind workflow; fork is a materialized copy with full
   re-embedding).
+
+## [0.5.8] — 2026-08-25
+
+### Fixed
+- **Packaging**: `dependencies` and `keywords` were misplaced in
+  `pyproject.toml` (parsed as URL metadata), so published wheels/sdists
+  carried **no dependency declarations** — a fresh `pip install hybriddb`
+  did not pull in chromadb. Both relocated into `[project]`.
+- Version string consistency (`__version__` matches package metadata).
+
+### Added
+- PyPI badges and project URLs in README.
+
+## [0.5.7] — 2026-08-25
+
+### Performance (from the v0.5.7 performance study, docs/PERFORMANCE.md)
+
+- **`insert_batch` is 13× faster** (1,860 → 24,500 rows/s at 100k rows):
+  profiling showed the write bottleneck was opening a fresh SQLite
+  connection per row (~200k connections per 100k rows), fixed by threading
+  the batch cursor through the CRUD hot paths and using one connection
+  end-to-end in journal processing.
+- **`insert_batch(sync=True)` now actually means synced**: batches larger
+  than the journal's per-call limit (5,000 entries) previously left the
+  journal backlogged, so every subsequent search silently paid a 35–40s
+  journal-flush embedding cost until drained. `sync=True` now drains fully
+  before returning.
+- DuckDB mirror stores `REAL` columns as `DOUBLE` (was float32, silently
+  losing precision vs SQLite's float64 — caught by a correctness-checked
+  benchmark).
+- Analytics: incremental journal sync no longer fails when `src` is already
+  attached (idempotent ATTACH).
+
+### Added
+
+- **BEIR search-accuracy evaluation** (`tests/benchmarks/test_accuracy.py`):
+  graded nDCG/recall/precision/MRR on NFCorpus + SciFact, for
+  keyword/semantic/hybrid, with fusion-weight and embedding-model
+  sensitivity. Findings: hybrid fusion beats both single modes in both
+  domains; the hash-embedding fallback is a 5.3× accuracy cliff.
+- Deep-dive benchmarks: DuckDB-vs-SQLite per query shape with correctness
+  assertions, mirror sync overhead, graph retrieval (`search_graph`,
+  `search_graph_ppr`), traversal, NetworkX build/cache, and
+  `scripts/analytics_sweep.py` — DuckDB wins 6–350× vs SQLite, growing with
+  scale, with zero write overhead from the mirror.
+- `docs/PERFORMANCE.md` — full performance study.
+
+### Fixed
+
+- Benchmark fixtures that broke at FULL scale: storage/graph tests inserted
+  string ids into the implicit INTEGER pk; recall fixtures had 10k-doc
+  clusters, capping recall@10 at 0.001; `test_sync_overhead` assumed one
+  `process_journal()` drains a 1M-entry backlog. All now valid at any scale.
 
 ## [0.5.6] — 2026-08-20
 
