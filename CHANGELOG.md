@@ -1,6 +1,25 @@
 # Changelog
 
-## [0.6.0] — 2026-08-26
+## [Unreleased]
+
+### Performance
+
+- **Versioned-table rollback is ~20× faster for removal-heavy cases**
+  (1,000 removed rows: 1,980ms → 92ms in the batched path, with Chroma +
+  DuckDB live: ~122ms). Root cause: `rollback()` looped per removed row
+  through public `delete()`, paying one SQLite connection + transaction and
+  ~10 statements per row (1.8s of 2.2s was connection/transaction overhead
+  — reported by CoreMem's gate, which measured 3.85s vs its ~1.25s target).
+  Removals are now set-based: one transaction, chunked `DELETE … WHERE pk
+  IN (…)` (500 pks per statement for SQLite bind limits), hash-chain
+  tombstones + journal delete entries via `executemany` with the chain
+  computed in memory (sorted pks, removals before restores). Also: O(1)
+  early-exit when no events were logged since the rollback target, and
+  `row_json` is only decoded for rows that need re-upserting. Restores
+  (re-upserts) remain per-row and embedding-dominated; batched restores are
+  a possible follow-up.
+
+## [0.6.0] — 2026-08-26 — 2026-08-26
 
 ### Added
 

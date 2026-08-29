@@ -180,6 +180,20 @@ class VersioningMixin:
         if not self.is_versioned(table):
             raise ValueError(f"Table '{table}' is not versioned (create it with versioned=True)")
 
+    def _state_at_raw(self, table: str, seq: int) -> dict[str, tuple[str, str]]:
+        """Like `_state_at` but without json parsing: {pk: (row_json, op)},
+        including tombstones. Used by `rollback` so rows that are not
+        restored are never json-decoded."""
+        hname = _history_table(table)
+        rows = self.raw_query(
+            f"SELECT pk, row_json, _op FROM ("
+            f"  SELECT pk, row_json, _op, ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _seq DESC) AS rn"
+            f"  FROM {hname} WHERE _seq <= ?"
+            f") WHERE rn = 1",
+            (seq,),
+        )
+        return {r["pk"]: (r["row_json"], r["_op"]) for r in rows}
+
     def _state_at(self, table: str, seq: int) -> dict[str, dict[str, Any]]:
         """Reconstruct {pk_str: row} for the table state at a log position."""
         hname = _history_table(table)
@@ -248,9 +262,10 @@ class VersioningMixin:
 
         The chain never rewinds: the rollback itself is recorded as new
         versions, and everything discarded stays verifiable in history.
-        Note: rows restored from LONGTEXT history are re-embedded into
-        Chroma, so rollback cost is O(changed rows) for update-heavy tables
-        and O(removed rows) for append-only tables.
+        Removals are applied in one batched transaction (set-based delete,
+        bulk tombstone + journal writes, hash chain computed in memory).
+        Restored LONGTEXT rows are re-embedded into Chroma, so rollback
+        cost is O(removed + changed rows) — cheap for append-heavy tables.
         """
         _validate_identifier(table, "table")
         self._require_versioned(table)
@@ -261,22 +276,100 @@ class VersioningMixin:
         else:
             raise ValueError("rollback requires checkpoint= or at_seq=")
 
+        hname = _history_table(table)
+
+        # O(1) early exit: no events logged since the target position means
+        # current state provably matches it — nothing to do.
+        with self._connect() as cur:
+            head = cur.execute(f"SELECT COALESCE(MAX(_seq), 0) FROM {hname}").fetchone()[0]
+        if head <= seq:
+            return {"table": table, "seq": seq, "changes": 0}
+
         pk_col = self._get_pk_column(table)
-        target = self._state_at(table, seq)
-        current = {
-            str(r[pk_col]): dict(r) for r in self.raw_query(f"SELECT * FROM {table}")
-        }
+        target_raw = self._state_at_raw(table, seq)
+        target_pks = {pk for pk, (rj, op) in target_raw.items() if op != "delete"}
+
+        current: dict[str, tuple[int, dict[str, Any]]] = {}
+        for r in self.raw_query(f"SELECT rowid AS _rid, * FROM {table}"):
+            row = {k: v for k, v in dict(r).items() if k != "_rid"}
+            current[str(r[pk_col])] = (r["_rid"], row)
 
         changes = 0
-        for pk_str, cur_row in current.items():
-            if pk_str not in target:
-                self.delete(table, cur_row[pk_col], sync=False)
+
+        # ── phase 1: batched removals — one transaction ──
+        # Rows present now but absent from the target state. Applied before
+        # any restores; pks sorted so the tombstone chain is deterministic.
+        removal_pks = sorted(pk for pk in current if pk not in target_pks)
+        if removal_pks:
+            with self._connect() as cur:
+                versioned, hash_chain = self._versioned_state(cur, table)
+                lt_cols = self._get_longtext_columns(table, cur=cur)
+                head_row = cur.execute(
+                    f"SELECT event_hash FROM {hname} ORDER BY _seq DESC LIMIT 1"
+                ).fetchone()
+                prev_hash = head_row[0] if head_row else GENESIS_HASH
+                now = _now_iso()
+                author = getattr(self, "author", None)
+                for start in range(0, len(removal_pks), 500):
+                    chunk = removal_pks[start : start + 500]
+                    ph = ",".join("?" * len(chunk))
+                    fetched = cur.execute(
+                        f"SELECT rowid AS _rid, * FROM {table} WHERE {pk_col} IN ({ph})",
+                        chunk,
+                    ).fetchall()
+                    by_pk = {str(r[pk_col]): r for r in fetched}
+                    cur.execute(f"DELETE FROM {table} WHERE {pk_col} IN ({ph})", chunk)
+                    journal_col = [
+                        (table, by_pk[pk]["_rid"], col, now)
+                        for pk in chunk for col in lt_cols
+                    ]
+                    journal_row = [(table, by_pk[pk]["_rid"], now, pk) for pk in chunk]
+                    tombstones = []
+                    for pk in chunk:
+                        tomb = {
+                            k: v for k, v in dict(by_pk[pk]).items() if k != "_rid"
+                        }
+                        rj = json.dumps(tomb, sort_keys=True, default=str)
+                        event_hash = (
+                            _event_hash(prev_hash, "delete", pk, rj)
+                            if hash_chain else ""
+                        )
+                        tombstones.append(
+                            ("delete", now, author, pk, rj, prev_hash, event_hash)
+                        )
+                        if hash_chain:
+                            prev_hash = event_hash
+                    if journal_col:
+                        cur.executemany(
+                            "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
+                            "VALUES (?, ?, ?, 'delete', ?)",
+                            journal_col,
+                        )
+                    if journal_row:
+                        cur.executemany(
+                            "INSERT INTO _journal (app_table, row_id, op, created_at, data) "
+                            "VALUES (?, ?, 'row_delete', ?, ?)",
+                            journal_row,
+                        )
+                    cur.executemany(
+                        f"INSERT INTO {hname} (_op, _ts, _author, pk, row_json, prev_hash, event_hash) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        tombstones,
+                    )
+                    changes += len(chunk)
+
+        # ── phase 2: restores / reverts (per-row; embedding-dominated) ──
+        # Chain continuity comes from the committed tombstone head: each
+        # upsert's _capture_history re-reads it. Only rows that actually
+        # differ from the current state are json-decoded here.
+        for pk_str, (rj, op) in target_raw.items():
+            if op == "delete":
+                continue  # deleted in the target state — removal only applies
+            cur_entry = current.get(pk_str)
+            if cur_entry is None or _canon(cur_entry[1]) != rj:
+                self.upsert(table, json.loads(rj), sync=False)
                 changes += 1
-        for pk_str, row in target.items():
-            cur_row = current.get(pk_str)
-            if cur_row is None or _canon(cur_row) != _canon(row):
-                self.upsert(table, row, sync=False)
-                changes += 1
+
         if sync:
             while self._journal_count(table) > 0:
                 self._process_journal()

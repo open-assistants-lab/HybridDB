@@ -350,3 +350,133 @@ class TestEndToEnd:
         out = str(Path(db.path) / "export")
         db.archive("docs", out, format="jsonl")
         assert (Path(out) / "docs.jsonl").exists()
+
+# ── Batched rollback fast path (rollback perf gate) ───────────────────────
+
+
+class TestRollbackPerfGate:
+    def test_rollback_beats_ingest_time(self, db):
+        """Consumer gate (CoreMem): rollback of N removed rows must not cost
+        more than ingesting those N rows. Exercises the batched removal path
+        at 1k removals."""
+        import time
+
+        db.create_table(
+            "msgs", {"id": "TEXT PRIMARY KEY", "content": LONGTEXT}, versioned=True
+        )
+        rows = [
+            {"id": f"m{i}", "content": f"session event {i} lorem ipsum dolor"}
+            for i in range(2000)
+        ]
+
+        def _drain():
+            while db._journal_count("msgs") > 0:
+                db.process_journal()
+
+        t0 = time.perf_counter()
+        for b in range(0, 2000, 500):
+            db.insert_batch("msgs", rows[b : b + 500], sync=False)
+        _drain()
+        ingest_base = time.perf_counter() - t0
+
+        db.checkpoint("msgs", "pre-extra")
+
+        extra = [{"id": f"x{i}", "content": f"extra {i}"} for i in range(1000)]
+        t0 = time.perf_counter()
+        for b in range(0, 1000, 500):
+            db.insert_batch("msgs", extra[b : b + 500], sync=False)
+        _drain()
+        ingest_extra = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        res = db.rollback("msgs", checkpoint="pre-extra")
+        rollback_time = time.perf_counter() - t0
+
+        assert res["changes"] == 1000
+        assert rollback_time <= ingest_extra, (
+            f"rollback {rollback_time:.3f}s > ingest {ingest_extra:.3f}s"
+        )
+        assert db.count("msgs") == 2000
+        assert db.verify_chain("msgs")["valid"] is True
+        # silence linters on the base-ingest measurement (context only)
+        assert ingest_base > 0
+
+
+class TestRollbackBatchedSemantics:
+    def test_rollback_equiv_per_row(self, vdb):
+        """Mixed rollback (removals + restores + updates) keeps every
+        invariant: state matches the target, history shows tombstones and
+        post-images, chain valid, health ok."""
+        # base state at checkpoint: {a, b, c}
+        vdb.insert("docs", {"id": "a", "body": "a-keep"})   # deleted post-cp -> restored
+        vdb.insert("docs", {"id": "b", "body": "b-keep"})   # untouched
+        vdb.insert("docs", {"id": "c", "body": "c-change-from"})  # changed -> reverted
+        cp = vdb.checkpoint("docs", "cp")
+        # post-checkpoint churn
+        vdb.insert("docs", {"id": "d", "body": "d-new"})          # post-cp add -> removed
+        vdb.insert("docs", {"id": "e", "body": "e-new"})          # post-cp add -> removed
+        vdb.delete("docs", "a")                                    # post-cp delete -> restored
+        vdb.update("docs", "c", {"body": "c-change-to"})           # post-cp change -> reverted
+        assert vdb.count("docs") == 4  # b, c, d, e
+
+        res = vdb.rollback("docs", checkpoint="cp")
+        assert res["changes"] == 4  # 2 removals + 1 restore + 1 revert
+        # state matches the checkpoint exactly
+        assert vdb.count("docs") == 3
+        assert {r["id"] for r in vdb.as_of("docs", seq=cp["seq"])} == {"a", "b", "c"}
+        assert vdb.get("docs", "a")["body"] == "a-keep"
+        assert vdb.get("docs", "c")["body"] == "c-change-from"
+        assert vdb.get("docs", "b")["body"] == "b-keep"
+        # removed rows (post-cp adds): tombstone with the last known content
+        h_d = vdb.history("docs", "d")
+        assert h_d[-1]["op"] == "delete"
+        assert h_d[-1]["data"]["body"] == "d-new"
+        # restored row shows a fresh post-image after its deletion
+        h_a = vdb.history("docs", "a")
+        assert h_a[-1]["data"]["body"] == "a-keep"
+        assert vdb.verify_chain("docs")["valid"] is True
+
+    def test_rollback_no_changes_returns_zero(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "v1"})
+        vdb.checkpoint("docs", "cp")
+        # no writes after the checkpoint
+        res = vdb.rollback("docs", checkpoint="cp")
+        assert res["changes"] == 0
+        assert vdb.count("docs") == 1
+        assert vdb.verify_chain("docs")["valid"] is True
+
+    def test_rollback_large_removal_chunking(self, vdb):
+        """1,200 removals exceed the 500-pk statement chunk."""
+        for i in range(1_200):
+            vdb.insert_batch("docs", [{"id": f"k{i}", "body": f"v{i}"}], sync=True)
+        vdb.checkpoint("docs", "cp")
+        extra = [{"id": f"x{i}", "body": f"x{i}"} for i in range(1_200)]
+        vdb.insert_batch("docs", extra, sync=True)
+        assert vdb.count("docs") == 2_400
+
+        res = vdb.rollback("docs", checkpoint="cp")
+        assert res["changes"] == 1_200
+        assert vdb.count("docs") == 1_200
+        assert vdb.get("docs", "x5") is None
+        assert vdb.get("docs", "k7")["body"] == "v7"
+        assert vdb.verify_chain("docs")["valid"] is True
+
+    def test_rollback_duckdb_and_chroma_sync(self, db):
+        pytest.importorskip("duckdb")
+        db.create_table("msgs", {"id": "TEXT PRIMARY KEY", "content": LONGTEXT}, versioned=True)
+        rows = [{"id": f"m{i}", "content": f"event {i}"} for i in range(300)]
+        db.insert_batch("msgs", rows, sync=True)
+        db.checkpoint("msgs", "cp")
+        extra = [{"id": f"x{i}", "content": f"extra {i}"} for i in range(100)]
+        db.insert_batch("msgs", extra, sync=True)
+        assert db.olap.query("SELECT count(*) c FROM msgs")[0]["c"] == 400
+
+        db.rollback("msgs", checkpoint="cp")
+        sqlite_n = db.count("msgs")
+        duck_n = db.olap.query("SELECT count(*) c FROM msgs")[0]["c"]
+        chroma_n = db._get_collection("msgs_content").count()
+        assert sqlite_n == 300
+        assert duck_n == sqlite_n
+        assert chroma_n == sqlite_n
+        assert db.health("msgs")["status"] == "ok"
+        assert db.verify_chain("msgs")["valid"] is True
