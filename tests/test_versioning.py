@@ -513,7 +513,7 @@ class TestBatchedRestore:
         self._drain(db, "kb")
         ingest_ref = time.perf_counter() - t0
 
-        cp = db.checkpoint("kb", "pre-churn")
+        db.checkpoint("kb", "pre-churn")
 
         # update-heavy churn: re-write 1,000 rows (timed — task gate)
         t0 = time.perf_counter()
@@ -572,7 +572,7 @@ class TestBatchedRestore:
 
     def test_rollback_restores_missing_rows_batched(self, vdb):
         vdb.insert("docs", {"id": "a", "body": "a-keep"})
-        cp = vdb.checkpoint("docs", "cp")
+        vdb.checkpoint("docs", "cp")
         vdb.delete("docs", "a")  # removal post-cp
         res = vdb.rollback("docs", checkpoint="cp")
         assert res["changes"] == 1

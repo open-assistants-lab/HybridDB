@@ -102,13 +102,6 @@ class VersioningMixin:
         """(is_versioned, hash_chain) without a caller cursor."""
         with self._connect() as cur:
             return self._versioned_state(cur, table)
-        """(is_versioned, hash_chain) using the caller's cursor."""
-        row = cur.execute(
-            "SELECT hash_chain FROM _versioned_tables WHERE table_name = ?", (table,)
-        ).fetchone()
-        if row is None:
-            return False, False
-        return True, bool(row[0])
 
     def _create_history_table(self, cur, table: str) -> None:
         hname = _history_table(table)
@@ -432,15 +425,12 @@ class VersioningMixin:
                     events = []
                     for pk_str, row in parsed_rows:
                         rid = rid_by_pk[pk_str]
+                        md = json.dumps(
+                            self._row_to_metadata(table, row, cur=cur, meta=meta)
+                        )
                         for col in lt_cols:
-                            md = json.dumps(
-                                self._row_to_metadata(
-                                    table, row, cur=cur, meta=meta
-                                )
-                            )
                             journal_col.append(
-                                (table, rid_by_pk[pk_str], col,
-                                 row.get(col, "") or "", md, now)
+                                (table, rid, col, row.get(col, "") or "", md, now)
                             )
                         journal_row.append(
                             (table, rid_by_pk[pk_str], now,
@@ -492,12 +482,10 @@ class VersioningMixin:
                         vals = [row.get(c) for c in non_pk_cols] + [pk_str]
                         updates.append(tuple(vals))
                         rid = current[pk_str][0]
+                        md = json.dumps(
+                            self._row_to_metadata(table, row, cur=cur, meta=meta)
+                        )
                         for col in lt_cols:
-                            md = json.dumps(
-                                self._row_to_metadata(
-                                    table, row, cur=cur, meta=meta
-                                )
-                            )
                             journal_col.append(
                                 (table, rid, col, row.get(col, ""), md, now)
                             )
