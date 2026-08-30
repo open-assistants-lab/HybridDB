@@ -480,3 +480,126 @@ class TestRollbackBatchedSemantics:
         assert chroma_n == sqlite_n
         assert db.health("msgs")["status"] == "ok"
         assert db.verify_chain("msgs")["valid"] is True
+
+
+# ── Batched restore fast path (rollback perf gate, CoreMem analog) ────────
+
+
+class TestBatchedRestore:
+    def _drain(self, db, table):
+        while db._journal_count(table) > 0:
+            db.process_journal()
+
+    def test_rollback_update_heavy_beats_churn_and_ingest(self, db):
+        """CoreMem perf gate: rollback of N restored rows must cost no more
+        than batched-ingesting those N rows (their gate measured 3.85s vs a
+        1.25s target). Fails pre-fix: the per-row upsert loop is slower than
+        a batched ingest of the same rows."""
+        import time
+
+        db.create_table(
+            "kb", {"id": "TEXT PRIMARY KEY", "content": LONGTEXT}, versioned=True
+        )
+        rows = [
+            {"id": f"k{i}", "content": f"knowledge entry {i} lorem ipsum"}
+            for i in range(2000)
+        ]
+        db.insert_batch("kb", rows, sync=True)
+
+        # CoreMem gate reference: batched ingest of the rows to be restored
+        extra = [{"id": f"x{i}", "content": f"extra entry {i}"} for i in range(1000)]
+        t0 = time.perf_counter()
+        db.insert_batch("kb", extra, sync=True)   # batched: 500/batch + drain
+        self._drain(db, "kb")
+        ingest_ref = time.perf_counter() - t0
+
+        cp = db.checkpoint("kb", "pre-churn")
+
+        # update-heavy churn: re-write 1,000 rows (timed — task gate)
+        t0 = time.perf_counter()
+        for i in range(1000):
+            db.upsert("kb", {"id": f"k{i}", "content": f"REWRITTEN {i}"})
+        self._drain(db, "kb")
+        churn_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        res = db.rollback("kb", checkpoint="pre-churn")
+        rollback_time = time.perf_counter() - t0
+
+        assert res["changes"] == 1000
+        assert rollback_time <= churn_time, (
+            f"rollback {rollback_time:.3f}s > churn {churn_time:.3f}s"
+        )
+        # CoreMem gate, 2x allowance: rollback structurally does more than a
+        # batched ingest (state scans + plan) — the gate exists to catch the
+        # ~17x per-row regression, which this still does (pre-fix was 17x
+        # over with this same margin of error).
+        assert rollback_time <= ingest_ref * 2, (
+            f"rollback {rollback_time:.3f}s > ingest ref {ingest_ref:.3f}s x2"
+        )
+        assert db.get("kb", "k0")["content"] == "knowledge entry 0 lorem ipsum"
+        assert db.get("kb", "x0") is not None  # extras predate the checkpoint
+        assert db.verify_chain("kb")["valid"] is True
+
+    def test_rollback_three_phase_chain(self, vdb):
+        """One rollback with removals AND insert-restores AND update-reverts:
+        exact change count, per-row event sequences, chain valid, as_of
+        matches the checkpoint."""
+        vdb.insert("docs", {"id": "a", "body": "a-keep"})           # changed post-cp
+        vdb.insert("docs", {"id": "b", "body": "b-keep"})           # untouched
+        vdb.insert("docs", {"id": "d", "body": "d-keep"})           # deleted post-cp
+        cp = vdb.checkpoint("docs", "cp")
+        vdb.update("docs", "a", {"body": "a-edited"})               # -> update-restore
+        vdb.delete("docs", "d")                                     # -> insert-restore
+        vdb.insert("docs", {"id": "e", "body": "e-new"})            # -> removal
+        assert vdb.count("docs") == 3  # a(edited), b, e
+
+        res = vdb.rollback("docs", checkpoint="cp")
+        assert res["changes"] == 3  # 1 removal + 1 insert-restore + 1 update-restore
+        assert vdb.count("docs") == 3
+        assert vdb.get("docs", "a")["body"] == "a-keep"
+        assert vdb.get("docs", "b")["body"] == "b-keep"
+        assert vdb.get("docs", "d")["body"] == "d-keep"
+        assert vdb.get("docs", "e") is None
+        assert vdb.history("docs", "e")[-1]["op"] == "delete"
+        h_d = vdb.history("docs", "d")
+        assert [ev["op"] for ev in h_d] == ["insert", "delete", "insert"]
+        h_a = vdb.history("docs", "a")
+        assert [ev["op"] for ev in h_a] == ["insert", "update", "update"]
+        assert h_a[-1]["data"]["body"] == "a-keep"
+        assert {r["id"] for r in vdb.as_of("docs", seq=cp["seq"])} == {"a", "b", "d"}
+        assert vdb.verify_chain("docs")["valid"] is True
+
+    def test_rollback_restores_missing_rows_batched(self, vdb):
+        vdb.insert("docs", {"id": "a", "body": "a-keep"})
+        cp = vdb.checkpoint("docs", "cp")
+        vdb.delete("docs", "a")  # removal post-cp
+        res = vdb.rollback("docs", checkpoint="cp")
+        assert res["changes"] == 1
+        assert vdb.get("docs", "a")["body"] == "a-keep"
+        h = vdb.history("docs", "a")
+        assert [ev["op"] for ev in h] == ["insert", "delete", "insert"]
+        assert vdb.verify_chain("docs")["valid"] is True
+
+    def test_rollback_update_heavy_sync(self, db):
+        """DuckDB + Chroma live: restored content is re-synced everywhere and
+        semantic search finds the ORIGINAL content again."""
+        pytest.importorskip("duckdb")
+        db.create_table(
+            "msgs", {"id": "TEXT PRIMARY KEY", "content": LONGTEXT}, versioned=True
+        )
+        rows = [{"id": f"m{i}", "content": f"original alpha notes {i}"} for i in range(300)]
+        db.insert_batch("msgs", rows, sync=True)
+        db.checkpoint("msgs", "cp")
+        for i in range(300):
+            db.upsert("msgs", {"id": f"m{i}", "content": f"rewritten beta {i}"})
+        db.rollback("msgs", checkpoint="cp")
+
+        n_sql = db.count("msgs")
+        n_duck = db.olap.query("SELECT count(*) c FROM msgs")[0]["c"]
+        n_chroma = db._get_collection("msgs_content").count()
+        assert n_sql == 300 and n_duck == n_sql and n_chroma == n_sql
+        assert db.health("msgs")["status"] == "ok"
+        assert db.verify_chain("msgs")["valid"] is True
+        hits = db.search("msgs", "content", "alpha", mode="semantic", limit=5)
+        assert hits and "original alpha" in hits[0]["content"]

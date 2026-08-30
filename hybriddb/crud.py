@@ -15,8 +15,12 @@ from hybriddb.utils import (
 logger = logging.getLogger("hybriddb")
 
 class CrudMixin:
-    def _row_to_metadata(self, table: str, row: dict[str, Any], cur=None) -> dict[str, Any]:
-        meta = self._table_meta(table, cur=cur)
+    def _row_to_metadata(self, table: str, row: dict[str, Any], cur=None,
+                         meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        # `meta` may be passed pre-fetched by batch loops (connection-hygiene:
+        # avoid re-reading + re-parsing the schema json per row).
+        if meta is None:
+            meta = self._table_meta(table, cur=cur)
         if not meta:
             return {}
         result = {}
