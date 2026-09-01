@@ -16,7 +16,7 @@ Expected current results:
 
 ```text
 ruff: All checks passed
-pytest: 214 passed, 48 skipped
+pytest: 224 passed, 48 skipped
 benchmark smoke: 48 passed
 ```
 
