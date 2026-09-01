@@ -1108,3 +1108,96 @@ class TestDisableChroma:
         db.insert("test", {"name": "hello"})
         results = db.search("test", "name", "hello", mode=SearchMode.KEYWORD)
         assert len(results) >= 1
+
+
+class TestSearchMetadataPrefilter:
+    """Feature: `where=` filters at the Chroma ANN level (pre-filter) in
+    addition to the existing Python post-filter — multi-tenant scoping."""
+
+    @pytest.fixture
+    def multi_tenant_db(self, db):
+        db.create_table("events", {
+            "id": "TEXT PRIMARY KEY",
+            "user_id": "TEXT",
+            "score": "INTEGER",
+            "title": "TEXT",
+            "body": "LONGTEXT",
+        })
+        db.insert_batch("events", [
+            {"id": "e1", "user_id": "u1", "score": 10, "title": "meeting notes alpha",
+             "body": "quarterly planning notes for the team"},
+            {"id": "e2", "user_id": "u2", "score": 80, "title": "meeting notes beta",
+             "body": "roadmap discussion and priorities"},
+            {"id": "e3", "user_id": "u1", "score": 30, "title": "planning review",
+             "body": "budget planning notes for finance"},
+            {"id": "e4", "user_id": "u2", "score": 90, "title": "roadmap review",
+             "body": "quarterly roadmap planning session"},
+        ], sync=True)
+        return db
+
+    def test_where_semantic_scopes_to_user(self, multi_tenant_db):
+        rows = multi_tenant_db.search(
+            "events", "body", "planning", mode=SearchMode.SEMANTIC,
+            where={"user_id": "u2"}, limit=20,
+        )
+        assert rows, "expected at least one hit"
+        assert {r["user_id"] for r in rows} == {"u2"}
+
+    def test_where_keyword_post_filter(self, multi_tenant_db):
+        rows = multi_tenant_db.search(
+            "events", "title", "meeting", mode=SearchMode.KEYWORD,
+            where={"user_id": "u1"}, limit=20,
+        )
+        assert {r["id"] for r in rows} == {"e1"}
+
+    def test_where_hybrid_scopes_to_user(self, multi_tenant_db):
+        rows = multi_tenant_db.search(
+            "events", "body", "roadmap", mode=SearchMode.HYBRID,
+            where={"user_id": "u2"}, limit=20,
+        )
+        assert rows and {r["user_id"] for r in rows} == {"u2"}
+
+    def test_where_numeric_operator_keyword(self, multi_tenant_db):
+        """Operator-form where must filter in keyword mode too (Python
+        evaluation — chroma only enforces it for semantic/hybrid)."""
+        rows = multi_tenant_db.search(
+            "events", "title", "review", mode=SearchMode.KEYWORD,
+            where={"score": {"$gte": 50}}, limit=20,
+        )
+        assert {r["id"] for r in rows} == {"e4"}  # e3 (score 30) filtered out
+
+    def test_where_numeric_operator_semantic(self, multi_tenant_db):
+        rows = multi_tenant_db.search(
+            "events", "body", "planning roadmap notes meeting",
+            mode=SearchMode.SEMANTIC, where={"score": {"$gte": 50}}, limit=20,
+        )
+        assert rows, "expected hits above the score threshold"
+        assert {r["id"] for r in rows} <= {"e2", "e4"}
+
+    def test_where_none_unchanged(self, multi_tenant_db):
+        rows = multi_tenant_db.search(
+            "events", "body", "planning", mode=SearchMode.SEMANTIC, limit=20,
+        )
+        assert {r["user_id"] for r in rows} == {"u1", "u2"}
+
+    def test_where_longtext_key_postfilter_still_correct(self, multi_tenant_db):
+        # `body` is LONGTEXT — not mirrored into Chroma metadata — so the
+        # semantic side matches nothing; keyword + post-filter still yield
+        # the exact-matching rows.
+        rows = multi_tenant_db.search(
+            "events", "title", "meeting", mode=SearchMode.KEYWORD,
+            where={"body": "roadmap discussion and priorities"}, limit=20,
+        )
+        assert {r["id"] for r in rows} == {"e2"}
+        sem = multi_tenant_db.search(
+            "events", "body", "roadmap", mode=SearchMode.SEMANTIC,
+            where={"body": "roadmap discussion and priorities"}, limit=20,
+        )
+        assert sem == [] or all(r["body"] == "roadmap discussion and priorities" for r in sem)
+
+    def test_search_all_where_uses_prefilter(self, multi_tenant_db):
+        rows = multi_tenant_db.search_all(
+            "events", "planning roadmap notes meeting",
+            where={"user_id": "u2"}, limit=20,
+        )
+        assert rows and {r["user_id"] for r in rows} == {"u2"}

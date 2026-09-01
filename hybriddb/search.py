@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from hybriddb.types import SearchMode
 from hybriddb.utils import (
@@ -21,6 +22,7 @@ class SearchMixin:
         fts_weight: float = 0.5, recency_weight: float = 0.0,
         recency_column: str | None = None,
         query_embedding: list[float] | None = None,
+        where: dict | None = None,
     ) -> list[dict]:
         _validate_identifier(table, "table")
         if query is None:
@@ -51,7 +53,7 @@ class SearchMixin:
         if mode in (SearchMode.KEYWORD, SearchMode.HYBRID):
             fts_results = self._fts_search(table, column, query, limit * 2)
         if mode in (SearchMode.SEMANTIC, SearchMode.HYBRID) and col_type == "LONGTEXT":
-            vec_results = self._vector_search(table, column, query, limit * 2, query_embedding=query_embedding)
+            vec_results = self._vector_search(table, column, query, limit * 2, query_embedding=query_embedding, where=where)
 
         ranked = (fts_results if mode == SearchMode.KEYWORD
                   else vec_results if mode == SearchMode.SEMANTIC
@@ -67,6 +69,8 @@ class SearchMixin:
             row = rows.get(row_id)
             if row is None:
                 continue
+            if where and not self._matches_where(row, where):
+                continue
             final_score = score
             if recency_weight > 0 and recency_column:
                 ts_str = row.get(recency_column)
@@ -79,6 +83,26 @@ class SearchMixin:
 
     def _matches_where(self, row: dict, where: dict) -> bool:
         for key, value in where.items():
+            if isinstance(value, dict):
+                # Chroma operator form (e.g. {"$gte": 50}). The vector index
+                # enforces it for semantic/hybrid queries; evaluate here too
+                # so keyword mode (no Chroma query) filters identically.
+                if key not in row:
+                    return False
+                for op, operand in value.items():
+                    v = row[key]
+                    try:
+                        if op == "$eq" and not v == operand: return False
+                        if op == "$ne" and not v != operand: return False
+                        if op == "$gt" and not v > operand: return False
+                        if op == "$gte" and not v >= operand: return False
+                        if op == "$lt" and not v < operand: return False
+                        if op == "$lte" and not v <= operand: return False
+                        if op not in ("$eq", "$ne", "$gt", "$gte", "$lt", "$lte"):
+                            return False
+                    except TypeError:
+                        return False
+                continue
             if key not in row:
                 return False
             if row[key] != value:
@@ -106,7 +130,7 @@ class SearchMixin:
 
         all_vec: list[tuple[int, float]] = []
         for col in lt_cols:
-            all_vec.extend(self._vector_search(table, col, query, limit * 2))
+            all_vec.extend(self._vector_search(table, col, query, limit * 2, where=where))
 
         ranked = self._fuse_hybrid(all_fts, all_vec, fts_weight)
         if not ranked:
@@ -178,15 +202,21 @@ class SearchMixin:
     def _vector_search(
         self, table: str, column: str, query: str,
         limit: int = 10, query_embedding: list[float] | None = None,
+        where: dict | None = None,
     ) -> list[tuple[int, float]]:
         collection_name = f"{table}_{column}"
         try:
             collection = self._get_collection(collection_name)
             embedding = query_embedding if query_embedding is not None else self._get_embedding(query)
-            results = collection.query(
-                query_embeddings=[embedding], n_results=limit,
-                include=["documents", "metadatas", "distances"],
-            )
+            qkwargs: dict[str, Any] = {
+                "query_embeddings": [embedding], "n_results": limit,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where:
+                # Chroma-native pre-filter: runs before the ANN scan
+                # (scalar columns mirrored via _row_to_metadata).
+                qkwargs["where"] = where
+            results = collection.query(**qkwargs)
             if not results["ids"] or not results["ids"][0]:
                 return []
             out = []

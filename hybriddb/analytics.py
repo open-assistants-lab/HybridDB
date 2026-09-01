@@ -223,6 +223,9 @@ class AnalyticsMixin:
                 "DuckDB analytics not available — DuckDB initialization failed "
                 "or module not installed"
             )
+        # Lazy registration: mirrors are created on first OLAP use rather
+        # than at database open (no maintenance cost for non-OLAP users).
+        self._auto_register_duckdb_tables()
         with self._db_lock:
             dk = self._duckdb_conn
             result = dk.execute(sql)

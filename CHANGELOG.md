@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+- **Metadata pre-filtering**: `search(..., where={...})` and
+  `search_all(..., where={...})` push scalar-column filters into Chroma
+  *before* the vector scan (multi-tenant scoping: `where={"user_id": "u2"}`),
+  with equality and Chroma operators (`{"$gte": ...}`); the Python post-filter
+  still runs on top. Keys must be scalar columns mirrored into Chroma
+  metadata.
+- **Long-document chunking helper** (`hybriddb.chunking.chunk_text`):
+  dependency-free, deterministic splitter (paragraph boundaries first, then
+  sentences, never mid-sentence; ~1200-char budget ≈ ~300 tokens for
+  MiniLM-class models; optional sentence overlap) plus the documented
+  chunks-as-rows ingestion pattern for multi-page knowledge documents.
+
+### Changed
+- **DuckDB mirrors are created on first OLAP query instead of at database
+  open** — tables the user never queries with `olap` cost nothing to
+  maintain. Previously-registered mirrors are still reconstructed on open.
+
 ### Performance
 
 - **Versioned-table rollback is ~20× faster for removal-heavy cases**

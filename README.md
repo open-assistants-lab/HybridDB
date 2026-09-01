@@ -29,6 +29,23 @@ db.query("docs", where="title LIKE ?", params=("%start%",))
 ```
 
 
+## Long Documents? Chunk Them (v0.6.0)
+
+Embedding one vector per row is right for messages and memory entries. For
+multi-page knowledge documents, index **chunks as rows** so retrieval works
+at paragraph granularity:
+
+```python
+from hybriddb.chunking import chunk_text
+
+db.create_table("doc_chunks", {"doc_id": TEXT, "chunk_seq": "INTEGER", "content": LONGTEXT})
+for i, chunk in enumerate(chunk_text(full_text)):   # ~300-token chunks, never mid-sentence
+    db.insert("doc_chunks", {"doc_id": doc_id, "chunk_seq": i, "content": chunk})
+
+# search chunks, then join back to the parent document
+hits = db.search("doc_chunks", "content", "quarterly roadmap", mode="hybrid")
+```
+
 ## Agent Memory You Can Audit (v0.6.0)
 
 Opt any table into **versioned history with a tamper-evident hash chain** —

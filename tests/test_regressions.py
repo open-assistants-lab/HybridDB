@@ -523,3 +523,56 @@ class TestSyncTrueDrainsJournal:
         rows = [{"title": f"t{i}"} for i in range(100)]
         db_no_chroma.insert_batch("docs", rows, sync=False)
         assert db_no_chroma._journal_count("docs") > 0
+
+
+class TestLazyDuckdbRegistration:
+    """DuckDB mirrors are created on first OLAP use, not at database open."""
+
+    def _make_db(self, tmp_dir):
+        pytest.importorskip("duckdb")
+        db = HybridDB(tmp_dir, max_chroma_index_gb=0)
+        db.create_table("events", {"val": "INTEGER"})
+        db.insert("events", {"val": 1})
+        return db
+
+    def test_no_mirror_created_on_reopen(self, tmp_dir):
+        db = self._make_db(tmp_dir)
+        db.close()
+        # reopening a DB with existing tables used to mirror ALL of them at
+        # open time, even if OLAP was never used
+        db = HybridDB(tmp_dir, max_chroma_index_gb=0)
+        assert "events" not in db._duckdb_synced_tables
+        names = [
+            r[0] for r in db._duckdb_conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main'"
+            ).fetchall()
+        ]
+        assert "events" not in names
+        db.close()
+
+    def test_first_olap_query_registers_and_syncs(self, tmp_dir):
+        db = self._make_db(tmp_dir)
+        rows = db.olap.query("SELECT count(*) AS c FROM events")
+        assert rows[0]["c"] == 1
+        assert "events" in db._duckdb_synced_tables
+        assert db.count("events") == db._duckdb_synced_tables["events"]["count"]
+        db.close()
+
+    def test_reopen_reconstructs_registered_mirrors_only(self, tmp_dir):
+        pytest.importorskip("duckdb")
+        db = self._make_db(tmp_dir)
+        db.register_duckdb_table("events")  # explicit registration persists
+        db.close()
+
+        db = HybridDB(tmp_dir, max_chroma_index_gb=0)
+        # previously-registered mirrors are reconstructed from _duckdb_sync
+        assert "events" in db._duckdb_synced_tables
+        # a table created after reopen is NOT auto-registered
+        db.create_table("later", {"val": "INTEGER"})
+        db.insert("later", {"val": 2})
+        assert "later" not in db._duckdb_synced_tables
+        # until it is queried
+        assert db.olap.query("SELECT count(*) AS c FROM later")[0]["c"] == 1
+        assert "later" in db._duckdb_synced_tables
+        db.close()

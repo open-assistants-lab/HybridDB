@@ -142,7 +142,9 @@ db.search_columns("docs", "getting started")
 Modes:
 
 ```python
-db.search("docs", "body", "hello", mode="keyword")
+db.search("docs", "body", "hello", mode="keyword",
+          where={"user_id": "u2"})   # scalar-column pre-filter at the Chroma level
+```
 db.search("docs", "body", "how do I begin?", mode="semantic")
 db.search("docs", "body", "getting started", mode="hybrid")
 
@@ -281,6 +283,54 @@ Semantics:
 
 `upsert()` also works on non-versioned tables (plain insert-or-update).
 
+### Metadata pre-filtering (multi-tenant scoping)
+
+`where=` filters at the Chroma ANN level **before** the vector scan when the
+keys are scalar columns mirrored into Chroma metadata (`TEXT`/`INTEGER`/
+`REAL`/`BOOLEAN` — not `LONGTEXT`/`JSON`). Equality (`{"user_id": "u2"}`) and
+Chroma operators (`{"score": {"$gte": 50}}`) are supported; operator-form
+filters are enforced by the vector index only. The Python post-filter still
+runs on top, so results are correct in every mode.
+
+## Long-Document Chunking
+
+One embedding per LONGTEXT cell is right for messages and memory entries.
+For multi-page knowledge documents, index **chunks as rows** using the
+dependency-free splitter:
+
+```python
+from hybriddb.chunking import chunk_text
+
+db.create_table("docs", {"id": TEXT, "title": TEXT, "full_text": LONGTEXT})
+db.create_table(
+    "doc_chunks",
+    {"doc_id": TEXT, "chunk_seq": "INTEGER", "content": LONGTEXT},
+)
+
+full_text = "...a long document..."
+db.insert("docs", {"id": doc_id, "title": "Design spec", "full_text": full_text})
+for i, chunk in enumerate(chunk_text(f"{title}. {full_text}")):
+    db.insert("doc_chunks", {"doc_id": doc_id, "chunk_seq": i, "content": chunk})
+```
+
+Splitting rules: paragraph boundaries first (``\n\n``), then sentences —
+never mid-sentence; adjacent pieces merge until ~1200 chars (~300 tokens for
+MiniLM-class models); oversize sentences hard-split as a last resort;
+``overlap=True`` prepends the previous chunk's final sentence.
+
+Retrieval searches the chunk table and joins back to the parent:
+
+```python
+hits = db.search("doc_chunks", "content", "consistency guarantees", mode="hybrid", limit=10)
+best_by_doc = {}
+for h in hits:
+    best_by_doc.setdefault(h["doc_id"], h)   # best chunk per document
+results = [(db.get("docs", d), h) for d, h in best_by_doc.items()]
+```
+
+Chunks are ordinary rows, so versioning, checkpoints, and rollback work on
+the chunk table unchanged.
+
 ## OLAP API
 
 DuckDB analytics are optional. Install with:
@@ -302,6 +352,8 @@ The facade auto-registers app tables with DuckDB before queries. Direct methods 
 
 - `register_duckdb_table(table)`
 - `unregister_duckdb_table(table)`
+
+Mirrors are created lazily on first OLAP use; tables the user never queries with `olap` are not mirrored.
 - `sync_duckdb_table(table)`
 - `analytics(sql)`
 

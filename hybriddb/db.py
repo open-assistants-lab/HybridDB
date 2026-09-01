@@ -119,8 +119,9 @@ class HybridDB(
         self._init_system_tables()
         if self._max_chroma_index_gb > 0:
             self._init_chroma(force_model)
+        # DuckDB mirrors are created lazily on first OLAP use (db.olap.query /
+        # analytics()); tables the user never queries cost nothing to maintain.
         self._init_duckdb()
-        self._auto_register_duckdb_tables()
         if self._max_chroma_index_gb > 0:
             self._check_index_health(auto_rebuild_chroma)
 
