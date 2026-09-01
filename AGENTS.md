@@ -24,7 +24,8 @@ a CHANGELOG entry — `__version__` and pyproject have drifted apart before.
   the single SQLite entry point (RLock-serialized, WAL, FK on)
 - mixins: `schema.py`, `crud.py`, `search.py`, `journal.py`, `versioning.py`,
   `graph.py`, `analytics.py`, `maintenance.py`, `export_import.py`,
-  `async_api.py`, plus `facades.py` (`db.graph`/`db.olap`) and `embedding.py`
+  `async_api.py`, plus `facades.py` (`db.graph`/`db.olap`), `embedding.py`
+  and `chunking.py` (long-doc splitting helper)
 - versioning spec + amendments: `docs/specs/2026-08-26-versioned-tables-v0.6.0.md`
 - performance study: `docs/PERFORMANCE.md`; benchmarks:
   `tests/benchmarks/` + `docs/BENCHMARKS.md`
@@ -57,6 +58,9 @@ rename_column/import_sql) must run `INSERT INTO fts(fts) VALUES('rebuild')`
 **DuckDB mirror.**
 - REAL columns map to `DOUBLE` (float32 loses precision — caught by a
   correctness-checked benchmark).
+- DuckDB mirrors are registered **lazily on first OLAP query** — do not
+  auto-register at open; journal entries for unregistered tables are
+  already skipped.
 - `_versioned`/`__history`-style engine tables must stay out of
   `_schema`/`list_tables()`/DuckDB auto-registry/graph sync.
 - DuckDB **merges** metadata on update/upsert; removing keys requires
@@ -75,6 +79,20 @@ changes on versioned tables raise. `__history` suffix and `_fts_` substrings
 are reserved in table names. History tables must never be registered in
 `_schema`, mirrored to DuckDB, or FTS/Chroma indexed.
 
+**Rollback batching.** Both rollback phases are set-based — removals (chunked
+`DELETE … pk IN`, 500 pks per statement) and restores (missing → batched
+`INSERT`, changed → batched full-row `UPDATE`; post-images contain every
+column, so full-row SET is equivalent). The SHA chain is computed in memory
+across all three phases (removals → insert-restores → update-restores, pks
+sorted, chain head threaded through `executemany` — the chain forces
+*ordering*, not per-row transactions). Never reintroduce per-row
+`delete()`/`upsert()` loops here (they measured 41× slower). `prune` deletes a contiguous prefix and records a chain
+anchor; without the anchor `verify_chain` breaks. Rollback re-applies state
+as *new* versions (chain never rewinds) and is itself audited. Schema
+changes on versioned tables raise. `__history` suffix and `_fts_` substrings
+are reserved in table names. History tables must never be registered in
+`_schema`, mirrored to DuckDB, or FTS/Chroma indexed.
+
 **read_query** is authorizer-enforced read-only. Note: the authorizer
 receives the **C API action codes**, which differ from the constants in
 Python's `sqlite3` module (`SQLITE_CREATE_TABLE=2` vs C's 5;
@@ -85,7 +103,15 @@ treated as DENY.
 `arr in [...]`-style truthiness on them. Chroma metadata **merges** on
 update/upsert and rejects empty dicts; removing a metadata key requires
 delete+re-add. Empty docs: `_get_embedding("")` calls the configured fn so
-custom dims stay consistent.
+custom dims stay consistent. Metadata scalar columns are mirrored for
+`where=` pre-filtering; operator forms (`$gte`…) are enforced by Chroma for
+semantic/hybrid but must ALSO be evaluated in `_matches_where` for keyword
+mode (no Chroma query happens there). Chroma metadata merges on
+update/upsert — removing keys requires delete+re-add.
+
+**Long documents** are chunked above the engine (`hybriddb.chunking` +
+chunks-as-rows with a parent link) — one embedding per LONGTEXT cell is the
+right granularity for messages/memory, not for multi-page documents.
 
 ## Testing conventions
 

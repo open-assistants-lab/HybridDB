@@ -20,6 +20,14 @@
   open** — tables the user never queries with `olap` cost nothing to
   maintain. Previously-registered mirrors are still reconstructed on open.
 
+### Fixed
+- Operator-form `where` (e.g. `{"score": {"$gte": 50}}`) was silently
+  ignored in **keyword mode**: Chroma only enforces operators during vector
+  queries, and the Python post-filter skipped operator entries — keyword
+  results came back unfiltered. The post-filter now evaluates the standard
+  operators (`$eq/$ne/$gt/$gte/$lt/$lte`) so `where=` filters identically
+  in all modes.
+
 ### Performance
 
 - **Versioned-table rollback is ~20× faster for removal-heavy cases**
@@ -33,11 +41,16 @@
   tombstones + journal delete entries via `executemany` with the chain
   computed in memory (sorted pks, removals before restores). Also: O(1)
   early-exit when no events were logged since the rollback target, and
-  `row_json` is only decoded for rows that need re-upserting. Restores
-  (re-upserts) remain per-row and embedding-dominated; batched restores are
-  a possible follow-up.
+  `row_json` is only decoded for rows that need re-upserting.
+- **Batched restores** (companion fix): update-heavy rollbacks re-apply
+  historical state as new versions via per-row `upsert()` — 1,000 restored
+  rows cost 3,931ms (41× the removal path). Restores are now split by class
+  (missing → batched `INSERT`; changed → batched full-row `UPDATE`), with
+  journal and history events via `executemany` and the SHA chain computed
+  in memory across all three phases. Measured: 3,931ms → 107ms at 100k-row
+  tables; Chroma re-embedding of restored LONGTEXT remains (by design).
 
-## [0.6.0] — 2026-08-26 — 2026-08-26
+## [0.6.0] — 2026-08-26
 
 ### Added
 
