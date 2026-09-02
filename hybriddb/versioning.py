@@ -328,7 +328,7 @@ class VersioningMixin:
                     by_pk = {str(r[pk_col]): r for r in fetched}
                     cur.execute(f"DELETE FROM {table} WHERE {pk_col} IN ({ph})", chunk)
                     journal_col = [
-                        (table, by_pk[pk]["_rid"], col, now)
+                        (table, by_pk[pk]["_rid"], col, pk, now)
                         for pk in chunk for col in lt_cols
                     ]
                     journal_row = [(table, by_pk[pk]["_rid"], now, pk) for pk in chunk]
@@ -349,8 +349,8 @@ class VersioningMixin:
                             prev_hash = event_hash
                     if journal_col:
                         cur.executemany(
-                            "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
-                            "VALUES (?, ?, ?, 'delete', ?)",
+                            "INSERT INTO _journal (app_table, row_id, column_name, op, data, created_at) "
+                            "VALUES (?, ?, ?, 'delete', ?, ?)",
                             journal_col,
                         )
                     if journal_row:
@@ -666,3 +666,90 @@ class VersioningMixin:
             )
             pruned = cur.execute("SELECT changes()").fetchone()[0]
         return {"pruned": pruned, "anchor_seq": last["_seq"]}
+
+    # ── chroma identity migration (v0.7 spec) ──────────────────────────────
+
+    def migrate_vector_identity(self, table: str | None = None) -> dict:
+        """Re-key chroma vectors from physical rowid ids to logical pk ids
+        (docs/specs/2026-08-28-chroma-identity-v0.7.md).
+
+        Embeddings are **carried over, never recomputed** (fetched and
+        re-upserted), so cost is a vector copy, not an embedding pass.
+        Idempotent. Default/alias-INTEGER-pk tables have identical keys —
+        the pass runs as a no-op and is reported under ``skipped_noop``.
+        Orphan vectors whose rowid no longer exists in SQLite are deleted
+        as ghosts (reconcile-style).
+        """
+        tables = [table] if table else self.list_tables()
+        summary: dict[str, Any] = {
+            "migrated": [], "vectors_rekeyed": 0, "skipped_noop": [], "orphans_deleted": 0,
+        }
+        for tbl in tables:
+            try:
+                lt_cols = self._get_longtext_columns(tbl)
+                pk_col = self._get_pk_column(tbl)
+            except Exception as e:
+                logger.warning("identity.migrate_table_failed table=%s error=%s", tbl, e)
+                continue
+            for col in lt_cols:
+                collection_name = f"{tbl}_{col}"
+                if self._chroma is None:
+                    continue
+                try:
+                    coll = self._chroma.get_or_create_collection(name=collection_name)
+                    scheme = self._collection_scheme(coll)
+                    if scheme == "pk":
+                        summary["skipped_noop"].append(tbl)
+                        continue
+                    got = coll.get(include=["embeddings", "documents", "metadatas"])
+                    ids = got.get("ids", [])
+                    if not ids:
+                        # nothing to re-key: just adopt the pk scheme
+                        md = dict(coll.metadata or {})
+                        md["hybriddb:identity"] = "pk"
+                        coll.modify(metadata=md)
+                        summary["migrated"].append(tbl)
+                        continue
+                    with self._connect() as cur:
+                        cur.execute(f"SELECT rowid AS _rid, {pk_col} AS _pk FROM {tbl}")
+                        rid_to_pk = {str(r["_rid"]): str(r["_pk"]) for r in cur.fetchall()}
+                    events = []          # (id, embeddings, documents, metadatas)
+                    orphans = 0
+                    seen_new: set[str] = set()
+                    for i, cid in enumerate(ids):
+                        # cid is the legacy chroma key = str(rowid); map it
+                        # to the row's logical pk via sqlite
+                        new_id = rid_to_pk.get(str(cid))
+                        if new_id is None:
+                            orphans += 1
+                            continue
+                        if new_id in seen_new:
+                            orphans += 1  # duplicate target: keep the first
+                            continue
+                        seen_new.add(new_id)
+                        events.append((
+                            new_id,
+                            got["embeddings"][i],
+                            got["documents"][i],
+                            got["metadatas"][i],
+                        ))
+                    for chunk_start in range(0, len(events), 500):
+                        ev = events[chunk_start:chunk_start + 500]
+                        coll.upsert(
+                            ids=[e[0] for e in ev],
+                            embeddings=[e[1] for e in ev],
+                            documents=[e[2] for e in ev],
+                            metadatas=[e[3] for e in ev],
+                        )
+                    legacy = [i for i in ids if i not in {e[0] for e in events}]
+                    for chunk_start in range(0, len(legacy), 500):
+                        coll.delete(ids=legacy[chunk_start:chunk_start + 500])
+                    md = dict(coll.metadata or {})
+                    md["hybriddb:identity"] = "pk"
+                    coll.modify(metadata=md)
+                    summary["migrated"].append(tbl)
+                    summary["vectors_rekeyed"] += len(events)
+                    summary["orphans_deleted"] += orphans
+                except Exception as e:
+                    logger.warning("identity.migrate_failed table=%s column=%s error=%s", tbl, col, e)
+        return summary

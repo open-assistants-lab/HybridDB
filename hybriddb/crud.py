@@ -289,9 +289,9 @@ class CrudMixin:
                 for col in lt_cols:
                     now = _now_iso()
                     cur.execute(
-                        "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
-                        "VALUES (?, ?, ?, 'delete', ?)",
-                        (table, internal_rowid, col, now),
+                        "INSERT INTO _journal (app_table, row_id, column_name, op, data, created_at) "
+                        "VALUES (?, ?, ?, 'delete', ?, ?)",
+                        (table, internal_rowid, col, str(row_id), now),
                     )
                     cur.execute(
                         "INSERT INTO _journal (app_table, row_id, column_name, op, data, metadata, created_at) "
@@ -358,9 +358,9 @@ class CrudMixin:
             for col in self._get_longtext_columns(table, cur=cur):
                 now = _now_iso()
                 cur.execute(
-                    "INSERT INTO _journal (app_table, row_id, column_name, op, created_at) "
-                    "VALUES (?, ?, ?, 'delete', ?)",
-                    (table, internal_rowid, col, now),
+                    "INSERT INTO _journal (app_table, row_id, column_name, op, data, created_at) "
+                    "VALUES (?, ?, ?, 'delete', ?, ?)",
+                    (table, internal_rowid, col, str(row_id), now),
                 )
             now = _now_iso()
             cur.execute(

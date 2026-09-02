@@ -717,15 +717,19 @@ class GraphMixin:
                     chroma_ids = vec_results.get("ids", [[]])[0]
                     if not chroma_ids:
                         continue
-                    rowid_list = ",".join("?" for _ in chroma_ids)
-                    rows = self.raw_query(
-                        f"SELECT rowid AS _rid, {pk_col} FROM {table} WHERE rowid IN ({rowid_list})",
-                        tuple(chroma_ids),
-                    )
-                    rowid_to_pk = {str(r["_rid"]): str(r[pk_col]) for r in rows}
+                    if self._collection_scheme(collection) == "pk":
+                        # chroma ids ARE the pks under the pk identity
+                        pk_by_id = {str(doc_id): str(doc_id) for doc_id in chroma_ids}
+                    else:
+                        rowid_list = ",".join("?" for _ in chroma_ids)
+                        rows = self.raw_query(
+                            f"SELECT rowid AS _rid, {pk_col} FROM {table} WHERE rowid IN ({rowid_list})",
+                            tuple(chroma_ids),
+                        )
+                        pk_by_id = {str(r["_rid"]): str(r[pk_col]) for r in rows}
                     for i, doc_id in enumerate(chroma_ids):
                         distance = vec_results["distances"][0][i] if "distances" in vec_results else 0
-                        pk_value = rowid_to_pk.get(str(doc_id), str(doc_id))
+                        pk_value = pk_by_id.get(str(doc_id), str(doc_id))
                         similarity = max(0.0, 1.0 - distance)
                         if similarity < min_similarity:
                             continue

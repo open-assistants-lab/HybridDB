@@ -81,15 +81,53 @@ class JournalMixin:
         journal wedge) or left Chroma with the wrong final state.
         """
         chroma_entries = [e for e in entries if e["op"] in ("add", "update", "delete")]
-        final_by_collection: dict[str, dict[str, dict]] = defaultdict(dict)
+        # Keep ALL entries per collection at this stage: a pk change journals
+        # a delete (old pk) and an add (new pk) sharing one rowid — collapsing
+        # by rowid here would drop the old-key delete before key resolution.
+        final_by_collection: dict[str, list[dict]] = defaultdict(list)
         for entry in chroma_entries:
             collection_name = f"{entry['app_table']}_{entry['column_name']}"
-            final_by_collection[collection_name][str(entry["row_id"])] = entry
+            final_by_collection[collection_name].append(entry)
 
-        for coll_name, by_id in final_by_collection.items():
+        for coll_name, entry_list in final_by_collection.items():
             collection = self._get_collection(coll_name)
             if collection is None:
                 continue
+            scheme = self._collection_scheme(collection)
+            table = entry_list[0]["app_table"]
+            pk_col = self._get_pk_column(table)
+            if scheme == "pk":
+                # Resolve the logical pk per ENTRY: the chroma key must be
+                # the pk (shared with SQLite/DuckDB), not the physical
+                # rowid. Deletes resolve from their own data (the app pk
+                # written by crud.delete); add/update events resolve via the
+                # current rowid→pk map. Two entries for one rowid can
+                # resolve to DIFFERENT chroma keys (a pk change moves the
+                # key from the old pk to the new one) — the last-op-wins
+                # dedupe happens on the RESOLVED keys (journal order is
+                # already chronological), after resolution.
+                resolved_keys: dict[int, str] = {}
+                add_update_rowids = [
+                    e["row_id"] for e in entry_list if e["op"] in ("add", "update")
+                ]
+                if add_update_rowids:
+                    with self._connect() as cur:
+                        ph = ",".join("?" * len(add_update_rowids))
+                        for r in cur.execute(
+                            f"SELECT rowid AS _rid, {pk_col} AS _pk FROM {table} WHERE rowid IN ({ph})",
+                            add_update_rowids,
+                        ).fetchall():
+                            resolved_keys[str(r["_rid"])] = str(r["_pk"])
+                rekeyed: dict[str, dict] = {}
+                for entry in entry_list:
+                    if entry["op"] == "delete":
+                        key = entry.get("data") or str(entry["row_id"])
+                    else:
+                        key = resolved_keys.get(str(entry["row_id"])) or str(entry["row_id"])
+                    rekeyed[key] = entry  # journal order: last-op-wins per resolved key
+                by_id = dict(rekeyed)
+            else:
+                by_id = {str(e["row_id"]): e for e in entry_list}
             ids = list(by_id.keys())
             for i in range(0, len(ids), CHROMA_BATCH):
                 chunk = ids[i:i + CHROMA_BATCH]

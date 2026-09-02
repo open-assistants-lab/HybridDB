@@ -202,7 +202,18 @@ class MaintenanceMixin:
     def _get_collection(self, name: str):
         if self._chroma is None:
             return None
-        return self._chroma.get_or_create_collection(name=name)
+        coll = self._chroma.get_or_create_collection(name=name)
+        md = coll.metadata or {}
+        if "hybriddb:identity" not in md:
+            # New (empty) collections are pk-keyed from creation; collections
+            # with data but no marker are pre-0.7 legacy rowid-keyed ones.
+            scheme = "pk" if coll.count() == 0 else "rowid"
+            coll.modify(metadata={**md, "hybriddb:identity": scheme})
+        return coll
+
+    @staticmethod
+    def _collection_scheme(coll) -> str:
+        return (coll.metadata or {}).get("hybriddb:identity", "rowid")
 
     def reconcile(self, table: str) -> dict:
         _validate_identifier(table, "table")
@@ -213,14 +224,25 @@ class MaintenanceMixin:
             collection_name = f"{table}_{col}"
             try:
                 collection = self._get_collection(collection_name)
+                scheme = self._collection_scheme(collection)
+                pk_col = self._get_pk_column(table)
                 chroma_ids = set(collection.get()["ids"]) if collection.count() > 0 else set()
 
                 with self._connect() as cur:
-                    cur.execute(f"SELECT rowid as _row, {col} FROM {table}")
-                    sql_rows = cur.fetchall()
+                    if scheme == "pk":
+                        cur.execute(f"SELECT rowid as _row, {pk_col} as _pk, {col} FROM {table}")
+                        sql_rows = cur.fetchall()
+                    else:
+                        cur.execute(f"SELECT rowid as _row, {col} FROM {table}")
+                        sql_rows = cur.fetchall()
 
-                sql_ids = {str(r["_row"]) for r in sql_rows}
-                id_to_row = {str(r["_row"]): dict(r) for r in sql_rows}
+                if scheme == "pk":
+                    # pk-scheme: the vector identity is the logical pk
+                    sql_ids = {str(r["_pk"]) for r in sql_rows}
+                    id_to_row = {str(r["_pk"]): dict(r) for r in sql_rows}
+                else:
+                    sql_ids = {str(r["_row"]) for r in sql_rows}
+                    id_to_row = {str(r["_row"]): dict(r) for r in sql_rows}
 
                 ghosts = chroma_ids - sql_ids
                 if ghosts:
@@ -229,14 +251,24 @@ class MaintenanceMixin:
 
                 missing = sql_ids - chroma_ids
                 if missing:
-                    with self._connect() as cur:
-                        cur.execute(
-                            f"SELECT *, rowid as _rowid FROM {table} "
-                            f"WHERE rowid IN ({','.join('?' * len(missing))})",
-                            tuple(int(mid) for mid in missing),
-                        )
-                        full_rows = cur.fetchall()
-                    full_row_by_rowid = {str(r["_rowid"]): dict(r) for r in full_rows}
+                    if scheme == "pk":
+                        with self._connect() as cur:
+                            cur.execute(
+                                f"SELECT *, {pk_col} as _rowid FROM {table} "
+                                f"WHERE {pk_col} IN ({','.join('?' * len(missing))})",
+                                tuple(missing),
+                            )
+                            full_rows = cur.fetchall()
+                        full_row_by_rowid = {str(r["_rowid"]): dict(r) for r in full_rows}
+                    else:
+                        with self._connect() as cur:
+                            cur.execute(
+                                f"SELECT *, rowid as _rowid FROM {table} "
+                                f"WHERE rowid IN ({','.join('?' * len(missing))})",
+                                tuple(int(mid) for mid in missing),
+                            )
+                            full_rows = cur.fetchall()
+                        full_row_by_rowid = {str(r["_rowid"]): dict(r) for r in full_rows}
 
                     ids_batch, embeddings_batch, docs_batch, metas_batch = [], [], [], []
                     for mid in missing:
@@ -544,19 +576,20 @@ class MaintenanceMixin:
                         self._chroma.delete_collection(collection_name)
                     except Exception:
                         pass
-                    collection = self._chroma.get_or_create_collection(
-                        name=collection_name
-                    )
+                    collection = self._get_collection(collection_name)
+                    pk_col = self._get_pk_column(tbl)
 
                     offset = 0
                     while True:
                         rows = self.raw_query(
-                            f"SELECT *, rowid as _row FROM {tbl} "
+                            f"SELECT *, rowid as _row, {pk_col} as _pk FROM {tbl} "
                             f"ORDER BY rowid LIMIT {CHROMA_BATCH} OFFSET {offset}"
                         )
                         if not rows:
                             break
-                        ids_batch = [str(r["_row"]) for r in rows]
+                        # pk-keyed identity: rebuilt collections are pk-keyed
+                        # (fresh collections get the pk marker via _get_collection)
+                        ids_batch = [str(r["_pk"]) for r in rows]
                         docs_batch = [r[col] or "" for r in rows]
                         emb_batch = [self._get_embedding(d) for d in docs_batch]
                         metas_batch = [self._row_to_metadata(tbl, dict(r)) for r in rows]

@@ -167,18 +167,21 @@ class SearchMixin:
         )
 
     def _fts_search(self, table: str, column: str, query: str, limit: int) -> list[tuple[int, float]]:
+        """Keyword search. Returns (pk_value, score) — pks, so the result ids
+        share one identity with the vector index and the row fetch."""
         fts_query = _sanitize_fts_query(query)
         if not fts_query:
             return []
 
         fts_table = f"{table}_fts_{column}"
         rowid_col = self._get_rowid_ref(table)
+        pk_col = self._get_pk_column(table)
         join_col = "m.rowid" if rowid_col == "rowid" else f"m.{rowid_col}"
 
         try:
             with self._connect() as cur:
                 cur.execute(
-                    f"SELECT {join_col} as id, bm25({fts_table}) as score "
+                    f"SELECT m.{pk_col} as id, bm25({fts_table}) as score "
                     f"FROM {fts_table} fts JOIN {table} m ON {join_col} = fts.rowid "
                     f"WHERE {fts_table} MATCH ? ORDER BY score LIMIT ?",
                     (fts_query, limit),
@@ -190,7 +193,7 @@ class SearchMixin:
                 escaped = query.replace("%", "\\%").replace("_", "\\_")
                 with self._connect() as cur:
                     cur.execute(
-                        f"SELECT {rowid_col} as id, 0.0 as score FROM {table} "
+                        f"SELECT {pk_col} as id, 0.0 as score FROM {table} "
                         f"WHERE {column} LIKE ? ESCAPE '\\' LIMIT ?",
                         (f"%{escaped}%", limit),
                     )
@@ -204,6 +207,10 @@ class SearchMixin:
         limit: int = 10, query_embedding: list[float] | None = None,
         where: dict | None = None,
     ) -> list[tuple[int, float]]:
+        """Vector search. Returns (pk_value, similarity) — for pk-scheme
+        collections the chroma ids are already pks; legacy rowid-keyed
+        collections are normalized to pks via one batched lookup, so all
+        search paths share one identity."""
         collection_name = f"{table}_{column}"
         try:
             collection = self._get_collection(collection_name)
@@ -219,8 +226,26 @@ class SearchMixin:
             results = collection.query(**qkwargs)
             if not results["ids"] or not results["ids"][0]:
                 return []
+            raw_ids = list(results["ids"][0])
+            if self._collection_scheme(collection) == "rowid":
+                # legacy collection: normalize rowid keys to pks so all
+                # search paths share one identity
+                legacy_ids = [str(i) for i in raw_ids if str(i).isdigit()]
+                rowid_to_pk: dict[str, Any] = {}
+                if legacy_ids:
+                    with self._connect() as cur:
+                        pk_col = self._get_pk_column(table, cur=cur)
+                        ph = ",".join("?" * len(legacy_ids))
+                        rowid_to_pk = {
+                            str(r["_rid"]): r["_pk"]
+                            for r in cur.execute(
+                                f"SELECT rowid AS _rid, {pk_col} AS _pk FROM {table} WHERE rowid IN ({ph})",
+                                legacy_ids,
+                            ).fetchall()
+                        }
+                raw_ids = [rowid_to_pk.get(str(i), i) for i in raw_ids]
             out = []
-            for i, doc_id in enumerate(results["ids"][0]):
+            for i, doc_id in enumerate(raw_ids):
                 distance = results["distances"][0][i] if "distances" in results else 0
                 similarity = max(0.0, 1.0 - distance)
                 try:
@@ -258,10 +283,12 @@ class SearchMixin:
             return 0.0
 
     def _fetch_rows_by_ids(self, table: str, ids: list[int | str]) -> dict[int | str, dict]:
+        """Fetch rows by pk — search-path ids are pks under the pk-keyed
+        vector identity (and FTS ids have always been pks)."""
         if not ids:
             return {}
         with self._connect() as cur:
-            lookup_col = self._get_rowid_ref(table, cur=cur)
+            lookup_col = self._get_pk_column(table, cur=cur)
             placeholders = ",".join("?" * len(ids))
             cur.execute(
                 f"SELECT *, {lookup_col} as _lookup_id FROM {table} WHERE {lookup_col} IN ({placeholders})", ids,
