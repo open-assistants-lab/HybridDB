@@ -217,6 +217,10 @@ Thread safety:
 - HybridDB uses an internal `RLock` around SQLite and DuckDB access.
 - ChromaDB calls are coordinated through the journal and per-instance operations.
 - For high-write workloads, prefer `insert_batch(..., sync=False)` plus `process_journal()`.
+- **One store per process.** A second process (dashboard, worker) should not open the same
+  database read-write; it can read the SQLite file read-only instead (WAL allows concurrent
+  readers), e.g. by attaching it from its own DuckDB instance. DuckDB mirrors are per-process
+  and rebuilt cheaply on demand (see `docs/PERFORMANCE.md`).
 
 ## Graph API
 

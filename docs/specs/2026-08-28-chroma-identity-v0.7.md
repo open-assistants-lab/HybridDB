@@ -120,3 +120,12 @@ With pk-keyed vectors, the vector ids *are* pks: fetch by
 - Changing FTS5 identity (FTS5 `content_rowid` stays rowid/pk — unchanged)
 - Bumping Chroma versions or switching engines (sqlite-vec evaluated and
   declined on performance)
+- **Watch: Quack Remote Protocol** (duckdb.org/quack) — DuckDB's new
+  client-server layer (beta). Evaluated 2026-08-28: declined for now —
+  HybridDB is embedded/local by positioning, no consumer needs
+  multi-process analytics, and a beta wire protocol in an embedded library
+  is asymmetric risk. Trigger to revisit: a named consumer needs
+  shared/multi-process stores — design a "team memory server" deployment
+  mode around Quack + DuckLake as a separate layer rather than changing
+  this library. Meanwhile, a second process can read the SQLite file
+  read-only (WAL allows concurrent readers).
