@@ -1,8 +1,11 @@
 # HybridDB API Reference
 
-This document describes the stable public API for HybridDB `0.4.x`.
+This document describes the stable public API for HybridDB `0.8.x`.
 
 HybridDB is one embedded database object that coordinates SQLite, FTS5, ChromaDB, a self-healing journal, optional DuckDB analytics, and optional graph helpers.
+
+> Source of truth: the code in `hybriddb/`. This file is verified against the
+> implementation and the changelog as of `0.8.0` (2026-09-03).
 
 ## Imports
 
@@ -18,10 +21,19 @@ from hybriddb import (
     SEMANTIC,
     TEXT,
     Column,
+    EmbeddingModelError,
     HybridDB,
     SearchMode,
+    default_embedding_fn,
 )
 ```
+
+Constants: `TEXT` and `LONGTEXT` enable FTS5 (`LONGTEXT` also enables ChromaDB
+semantic search); `INTEGER`, `REAL`, `BOOLEAN`, `JSON` are plain SQLite columns.
+`KEYWORD`, `SEMANTIC`, `HYBRID` are `SearchMode` enum aliases. `Column(type,
+constraints)` is a typed schema helper for `create_table()`.
+`EmbeddingModelError` is raised when the configured embedding model cannot be
+loaded; `default_embedding_fn` is ChromaDB's bundled local MiniLM embedding.
 
 ## Constructor
 
@@ -30,19 +42,26 @@ db = HybridDB(
     path="./data",
     embedding_fn=None,
     embedding_model_name=None,
+    force_model=False,
     max_chroma_index_gb=5,
     auto_rebuild_chroma=False,
 )
 ```
 
-Defaults:
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | — | Directory for the SQLite file (`app.db`) and the vector store (`vectors/`). Created if missing. |
+| `embedding_fn` | `callable \| None` | `None` | Custom embedding function. Defaults to ChromaDB's bundled local MiniLM. |
+| `embedding_model_name` | `str \| None` | `None` | Label recorded for the embedding. Defaults to `chroma:all-MiniLM-L6-v2`, or `"custom"` when `embedding_fn` is provided. |
+| `force_model` | `bool` | `False` | Skip the embedding-model mismatch check on init — use when you deliberately swapped `embedding_fn` for an existing store. |
+| `max_chroma_index_gb` | `int` | `5` | Guardrail for local disk usage by the vector index. |
+| `auto_rebuild_chroma` | `bool` | `False` | Rebuild the Chroma index on startup when a corruption check trips. |
 
-- `embedding_fn=None` uses ChromaDB's bundled local MiniLM embedding.
-- Hash embedding is used only as a fallback if ChromaDB's default embedding cannot load.
-- `embedding_model_name=None` records `chroma:all-MiniLM-L6-v2` for the default embedding.
-- `max_chroma_index_gb=5` protects local disk usage.
+A hash embedding is used only as a fallback if ChromaDB's default embedding
+cannot load — it exists for offline smoke tests, not production (measured at a
+5.3× accuracy cliff on BEIR; see `docs/PERFORMANCE.md`).
 
-Use a custom embedding function when you need a specific model or provider:
+Custom embedding:
 
 ```python
 db = HybridDB(
@@ -57,6 +76,8 @@ db = HybridDB(
 ```python
 db.create_table("docs", {"title": TEXT, "body": LONGTEXT, "tags": JSON})
 db.create_table("typed_docs", {"title": Column(TEXT), "body": Column(LONGTEXT)})
+db.create_table("memories", {"id": TEXT, "content": LONGTEXT},
+                versioned=True, hash_chain=True)
 ```
 
 Column types:
@@ -79,9 +100,19 @@ db.rename_column("docs", "summary", "abstract")
 db.drop_column("docs", "abstract")
 schema = db.get_schema("docs")
 tables = db.list_tables()
+db.is_versioned("docs")   # -> bool
 ```
 
-Public methods validate table and column identifiers. Use simple Python identifiers such as `docs`, `messages`, `content`, or `created_at`.
+Public methods validate table and column identifiers. Use simple Python
+identifiers such as `docs`, `messages`, `content`, or `created_at`.
+
+Notes:
+
+- Schema changes (`add_column` / `drop_column` / `rename_column`) are
+  **rejected on versioned tables**.
+- Creating a table with an `id` column that lacks `PRIMARY KEY` raises a
+  clear error (it collides with the implicit auto-increment `id`).
+- Primary keys on any column name are supported (`my_pk INTEGER PRIMARY KEY`).
 
 ## CRUD
 
@@ -93,9 +124,20 @@ row = db.get("docs", row_id)
 ok = db.update("docs", row_id, {"title": "Updated"})
 deleted = db.delete("docs", row_id)
 total = db.count("docs")
+
+pk = db.upsert("docs", {"id": 1, "title": "Hello", "body": "..."})
 ```
 
-`insert_batch()` returns `list[int | str]`. It returns strings when your table uses `id TEXT PRIMARY KEY`.
+- `insert_batch()` returns `list[int | str]` — strings when the table uses
+  `id TEXT PRIMARY KEY`. Batches larger than the journal cap (5,000 entries)
+  log a warning; with `sync=True` the journal is fully drained before
+  returning (since 0.5.7 large batches no longer leave a backlog).
+- `upsert()` inserts the row if its primary key is absent, else updates it.
+  It requires the primary key column in `data` (a missing pk raises a clear
+  `ValueError`). On versioned tables the prior state is captured in history
+  automatically.
+- Explicitly provided primary key values are honored on insert/update,
+  including moving the row across Chroma and DuckDB when the pk changes.
 
 ## Query
 
@@ -115,7 +157,11 @@ For custom read-only SQL, use `read_query()`:
 rows = db.read_query("SELECT title FROM docs WHERE title LIKE ?", ("%hello%",))
 ```
 
-For advanced migrations or custom writes, use `raw_query()` or the public cursor context manager:
+`read_query` is enforced read-only at the SQLite level via an authorizer
+(WITH-clause write bypasses are closed).
+
+For advanced migrations or custom writes, use `raw_query()` or the public
+cursor context manager:
 
 ```python
 with db.cursor() as cur:
@@ -144,14 +190,33 @@ Modes:
 ```python
 db.search("docs", "body", "hello", mode="keyword",
           where={"user_id": "u2"})   # scalar-column pre-filter at the Chroma level
-```
 db.search("docs", "body", "how do I begin?", mode="semantic")
 db.search("docs", "body", "getting started", mode="hybrid")
 
 db.search("docs", "body", "hello", mode=SearchMode.KEYWORD)
-db.search("docs", "body", "hello", mode=KEYWORD)
+db.search("docs", "docs", "hello", mode=KEYWORD)
 db.search("docs", "body", "hello", mode=HYBRID)
 ```
+
+Full signature:
+
+```python
+db.search(
+    table, column, query=None,
+    mode=SearchMode.HYBRID, limit=10,
+    fts_weight=0.5, recency_weight=0.0, recency_column=None,
+    query_embedding=None, where=None,
+)
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `mode` | `hybrid` | `keyword` (BM25 lexical), `semantic` (vector ANN), or `hybrid` (RRF fusion of both). |
+| `limit` | `10` | Maximum number of results. |
+| `fts_weight` | `0.5` | Keyword-vs-semantic weight in the RRF fusion. Measured sweet spot — the accuracy curve is flat within ±0.03 either side. |
+| `recency_weight` / `recency_column` | `0.0` / `None` | Boost recent content over older content. |
+| `query_embedding` | `None` | Pre-computed query embedding; skips the embedding call. |
+| `where` | `None` | Scalar-column filters pushed into the Chroma scan **before** the vector query. See [Metadata pre-filtering](#metadata-pre-filtering-multi-tenant-scoping). |
 
 Behavior:
 
@@ -159,6 +224,15 @@ Behavior:
 - `LONGTEXT` columns support keyword, semantic, and hybrid search.
 - Hybrid search fuses keyword and vector results using reciprocal-rank fusion.
 - Empty queries return `[]`.
+- `search(..., query=None)` skips search entirely and returns the latest rows
+  ordered by primary key.
+- Pending journal entries for the table are processed before searching.
+- If the Chroma index is unavailable for a table, semantic and hybrid modes
+  degrade to keyword automatically.
+
+`search_all(table, query, where=None, limit=10, fts_weight=0.5)` and
+`search_columns(...)` accept the same `where` / `fts_weight` / `limit`
+parameters.
 
 Recency scoring:
 
@@ -179,17 +253,44 @@ HybridDB journals ChromaDB and DuckDB mutations in SQLite. By default, inserts p
 ```python
 db.insert_batch("docs", rows, sync=False)
 pending = db.journal_status("docs")
-processed = db.process_journal()
+processed = db.process_journal(limit=5000)
 ```
+
+Batches larger than 5,000 rows log a warning recommending deferred sync.
 
 Health and repair:
 
 ```python
 health = db.health("docs")
+# {"sqlite_rows": 5000, "chroma_docs": {"contacts_bio": 5000}, "status": "ok"}
+
 result = db.reconcile("docs")
+# {"ghosts_deleted": 0, "missing_added": 3, "metadata_updated": 0}
 ```
 
-`reconcile()` repairs missing ChromaDB documents, removes ghosts, and refreshes graph-derived state.
+`reconcile()` repairs missing ChromaDB documents, removes ghosts, and
+refreshes graph-derived state.
+
+Maintenance and backup:
+
+```python
+db.backup(path)                    # copy the entire database directory atomically
+db.restore(path)                   # replace the current database from a backup
+db.vacuum()                        # reclaim disk space (rebuilds the SQLite file)
+report = db.check_integrity()      # diagnostics across SQLite, ChromaDB, DuckDB
+db.reindex(table=None)             # rebuild Chroma + FTS5 + DuckDB from SQLite data
+db.force_rebuild_chroma_index()    # drop and rebuild the Chroma index
+db.stats()                         # size and count statistics for all storage layers
+db.close()                         # close handles
+```
+
+Export/import as portable SQL (FTS5 is excluded from dumps and rebuilt on
+import):
+
+```python
+db.export_sql("dump.sql")
+db.import_sql("dump.sql")
+```
 
 ## Async API
 
@@ -224,23 +325,77 @@ Thread safety:
 
 ## Graph API
 
-Graph helpers are available directly and through `db.graph`.
+Graph helpers are available directly and through the `db.graph` facade.
+Synced node ids are **namespaced by table**: `{table}:{pk}` (e.g. `docs:1`,
+`items:a1`) — manual edges between synced nodes must use namespaced ids.
 
 ```python
-alice = db.graph.add_node(label="Alice", type="person")
-bob = db.graph.add_node(label="Bob", type="person")
+alice = db.graph.add_node(label="Alice", type="person")     # auto-generated id
+bob   = db.graph.add_node("bob-1", label="Bob", type="person")
 db.graph.add_edge(None, alice, bob, edge_type="knows", weight=0.9)
 
-neighbors = db.graph.get_neighbors(alice)
+neighbors = db.graph.get_neighbors(alice, direction="both")
 path = db.graph.shortest_path(alice, bob)
-scores = db.graph.pagerank()
+scores = db.graph.pagerank()                                 # standard PageRank
+scores = db.graph.pagerank(personalization={"docs:1": 1.0}, alpha=0.85)
+
 # semantic graph retrieval: vector-search seeds, then expand via PageRank
 ppr = db.graph.search_graph_ppr("memory", hop_expansion=2, limit=5)
-# re-sync registered table rows into graph nodes
+# spread from 20 seeds but return top-5
+ppr = db.graph.search_graph_ppr("memory", k_seeds=20, limit=5)
+
+# re-sync registered table rows into graph nodes (also removes ghost nodes)
 synced = db.graph.sync_graph_nodes()
 ```
 
-The namespaced `db.graph` facade exists for discoverability. Direct methods such as `db.add_node()` and `db.shortest_path()` remain supported.
+Node/edge inventory:
+
+| Method | Purpose |
+|---|---|
+| `add_node(id=None, label="", **kw)` / `add_nodes(nodes)` | Create nodes (re-adding an existing id preserves its edges) |
+| `get_node(id)` / `update_node(id, data)` / `delete_node(id)` | Node lifecycle |
+| `list_nodes(...)` | Enumerate nodes |
+| `add_edge(id=None, source, target, type="relates_to", weight=1.0, properties=None, valid_until=None)` / `add_edges(edges)` | Edges with optional expiry |
+| `get_edge(id)` / `get_edges(source=, target=, type=, limit=)` / `update_edge(id, data)` / `delete_edge(id)` | Edge lifecycle |
+| `neighbors(id, direction="both", type=None)` / `get_neighbors(...)` | Adjacency |
+| `traverse(start_id, max_depth=3, direction="out", type=None, max_cost=3.0)` | Recursive CTE traversal with cost cap |
+| `shortest_path(source, target)` | Weighted shortest path |
+| `pagerank(personalization=None, alpha=0.85)` | Standard or personalized PageRank |
+| `betweenness_centrality()` / `community_detect()` / `connected_components()` | NetworkX algorithms |
+| `decay_edges()` | Age-based edge decay |
+| `to_networkx(directed=True)` | Export for custom algorithms |
+
+Graph-aware semantic retrieval:
+
+```python
+# vector-search seeds, then expand neighbors
+db.search_graph("memory", hop_expansion=2, limit=10)
+
+# vector seeds -> subgraph expansion -> Personalized PageRank
+ppr = db.graph.search_graph_ppr(
+    "memory",
+    hop_expansion=2,       # traversal depth from seeds
+    limit=10,              # final results
+    alpha=0.15,            # damping: lower = more concentrated near seeds
+    min_similarity=0.0,    # seed filter (keep 0.0 for MiniLM — distances hover near 1.0)
+    k_seeds=None,          # separate seed count from result count
+)
+```
+
+Auto-sync rules let table rows become graph nodes/edges automatically:
+
+```python
+db.graph.register_entity_node("docs", type="entity", id_column="id",
+                              label_template="docs: {title}")
+db.graph.register_edge_rule("messages", "docs", edge_type="mentions")
+db.graph.sync_graph_nodes()   # refreshes labels, removes ghost nodes
+```
+
+- Synced ids are namespaced (`docs:1`); label templates render every
+  `{column}` placeholder from the row.
+- `search_graph_ppr` runs PageRank on the undirected subgraph (consistent
+  with `direction="both"` traversal).
+- Edge rules use each table's real primary key column.
 
 ## Versioned Tables
 
@@ -255,7 +410,7 @@ db.author = "agent-1"                       # optional, recorded per event
 db.upsert("docs", {"id": 1, "body": "v1"})  # insert-or-update
 db.upsert("docs", {"id": 1, "body": "v2"})
 
-db.log("docs")                              # change log, newest first
+db.log("docs", limit=100)                   # change log, newest first
 db.history("docs", key=1)                   # every version of a row
 db.diff("docs", from_seq=1, to_seq=2)       # added/removed/changed
 db.as_of("docs", seq=1)                     # point-in-time read
@@ -265,6 +420,7 @@ db.rollback("docs", checkpoint="before-edit")   # state re-applied as new versio
 db.verify_chain("docs")                     # -> {"valid": True, "checked": N, ...}
 db.archive("docs", "exports/docs", format="parquet")  # or "jsonl"
 db.prune("docs", before_seq=5)              # retention; keeps the chain verifiable
+db.is_versioned("docs")                     # -> bool
 ```
 
 Semantics:
@@ -277,7 +433,8 @@ Semantics:
   boundary.
 - Rollback cost depends on the workload: append-heavy tables pay only
   Chroma deletions (cheap); update-heavy tables re-embed restored
-  LONGTEXT rows (O(changed rows)).
+  LONGTEXT rows (O(changed rows)). Since 0.7.0 both paths are batched —
+  removal-heavy rollbacks are ~20× faster, update-heavy restores ~37×.
 - Schema changes (`add_column`/`drop_column`/`rename_column`) are rejected
   on versioned tables.
 - History tables are engine-managed: excluded from `list_tables()`, DuckDB
@@ -285,7 +442,24 @@ Semantics:
 - Write overhead is ~13% (measured at 100k rows). `fork` is planned but
   deferred — checkpoint/rollback covers the rewind workflow.
 
-`upsert()` also works on non-versioned tables (plain insert-or-update).
+`upsert()` also works on non-versioned tables (plain insert-or-update). It
+requires the primary key column in `data`.
+
+### Vector identity migration (0.8.0)
+
+Chroma vectors are keyed by the logical primary key (`str(pk)`), not the
+physical rowid — one identity shared across SQLite, the DuckDB mirror, and
+Chroma. New collections are pk-keyed from creation; **pre-0.8 collections
+keep rowid keys until migrated — upgrading changes nothing until you opt
+in**:
+
+```python
+db.migrate_vector_identity(table=None)   # None = all longtext collections
+```
+
+Re-keys legacy collections by **copying embeddings (never recomputed —
+asserted bit-identical)** and deleting orphan rowid-keyed vectors; idempotent;
+default rowid-alias tables are no-ops.
 
 ### Metadata pre-filtering (multi-tenant scoping)
 
@@ -294,7 +468,8 @@ keys are scalar columns mirrored into Chroma metadata (`TEXT`/`INTEGER`/
 `REAL`/`BOOLEAN` — not `LONGTEXT`/`JSON`). Equality (`{"user_id": "u2"}`) and
 Chroma operators (`{"score": {"$gte": 50}}`) are supported; operator-form
 filters are enforced by the vector index only. The Python post-filter still
-runs on top, so results are correct in every mode.
+runs on top, so results are correct in every mode (keyword-mode operator
+filtering fixed in 0.7.0).
 
 ## Long-Document Chunking
 
@@ -317,10 +492,14 @@ for i, chunk in enumerate(chunk_text(f"{title}. {full_text}")):
     db.insert("doc_chunks", {"doc_id": doc_id, "chunk_seq": i, "content": chunk})
 ```
 
+```python
+chunk_text(text, max_chars=1200, overlap=True)
+```
+
 Splitting rules: paragraph boundaries first (``\n\n``), then sentences —
 never mid-sentence; adjacent pieces merge until ~1200 chars (~300 tokens for
 MiniLM-class models); oversize sentences hard-split as a last resort;
-``overlap=True`` prepends the previous chunk's final sentence.
+``overlap=True`` (default) prepends the previous chunk's final sentence.
 
 Retrieval searches the chunk table and joins back to the parent:
 
@@ -356,17 +535,19 @@ The facade auto-registers app tables with DuckDB before queries. Direct methods 
 
 - `register_duckdb_table(table)`
 - `unregister_duckdb_table(table)`
-
-Mirrors are created lazily on first OLAP use; tables the user never queries with `olap` are not mirrored.
 - `sync_duckdb_table(table)`
 - `analytics(sql)`
+
+Mirrors are created lazily on first OLAP use; tables the user never queries
+with `olap` are not mirrored (since 0.7.0).
 
 ## Public vs Private
 
 Stable public API:
 
 - Methods documented in this file.
-- Constants exported from `hybriddb`.
+- Constants exported from `hybriddb` (including `EmbeddingModelError` and
+  `default_embedding_fn`).
 - `db.graph` and `db.olap` facades.
 
 Private/internal API:
