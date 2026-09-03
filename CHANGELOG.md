@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.8.0] — 2026-09-03
+
+### Changed
+
+- **Chroma vectors are keyed by the logical primary key** (`str(pk)`), not
+  the physical rowid — one identity shared across SQLite, the DuckDB mirror,
+  and Chroma. This deletes at the root the bug class behind the TEXT-PK
+  journal wedge (`DuplicateIDError` on delete+reinsert, TEXT-PK tables reuse
+  rowids) and the repeated rowid→pk mapping bugs (0.5.4/0.5.5/CoreMem).
+  Implements docs/specs/2026-08-28-chroma-identity-v0.7.md:
+  - Per-collection identity marker (`hybriddb:identity: pk|rowid`) in Chroma
+    collection metadata. **New collections are pk-keyed from creation;
+    pre-0.8 collections keep rowid keys until migrated — upgrading changes
+    nothing until you opt in.**
+  - `migrate_vector_identity(table=None)` re-keys legacy collections by
+    **copying embeddings (never recomputed — asserted bit-identical)** and
+    deleting orphan rowid-keyed vectors; idempotent; covers all longtext
+    collections (versioned or not); default rowid-alias tables are no-ops.
+  - The journal apply path resolves rowid→pk per collection scheme (batched
+    SELECT; `crud.delete` now stores the app pk in the delete entry's data);
+    last-op-wins dedupe happens on resolved keys, so a pk change journals
+    delete(old-pk) + add(new-pk) correctly.
+  - Read paths unified on pks: FTS keyword ids, vector ids, and
+    `_fetch_rows_by_ids` all use the pk — `_find_seed_nodes` skips its
+    rowid→pk mapping for pk-keyed collections; `reconcile` is scheme-aware.
+  - The TEXT-PK delete+reinsert scenario can no longer produce duplicate
+    vector keys (regression test).
+
 ## [0.7.0] — 2026-09-02
 
 ### Added
