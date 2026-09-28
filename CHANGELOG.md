@@ -27,6 +27,11 @@
   - `restore()` had the same defect and now applies the same invalidation.
   - `auto_rebuild_chroma=True` skips (with a warning) instead of failing
     construction when the path is shared.
+  - A rebuild no longer leaks Chroma `System`s: the temp client created for the
+    staging directory is evicted on both the success and failure paths (an
+    un-evicted one holds an open handle to a directory that no longer exists).
+  - A rebuild that fails *after* the cache drop re-attaches a fresh client
+    instead of leaving the instance bound to a stopped `System`.
 
 ## [0.8.0] — 2026-09-03
 

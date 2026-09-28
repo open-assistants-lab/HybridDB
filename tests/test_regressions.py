@@ -644,6 +644,48 @@ class TestChromaDirectorySwap:
         assert db.count("after_restore") == 1
         db.close()
 
+    def test_failed_rebuild_leaves_instance_usable(self, tmp_dir, monkeypatch):
+        """A swap that fails after the cache was dropped must not brick the
+        instance: the data is intact, so the client is re-attached."""
+        import hybriddb.maintenance as maintenance
+
+        db = self._make_db(tmp_dir)
+        real_move = maintenance.shutil.move
+        calls = {"n": 0}
+
+        def boom(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("simulated swap failure")
+            return real_move(src, dst)
+
+        monkeypatch.setattr(maintenance.shutil, "move", boom)
+        with pytest.raises(OSError, match="simulated swap failure"):
+            db.force_rebuild_chroma_index()
+        monkeypatch.undo()
+
+        assert db.count("msgs") == 5
+        db.create_table("after_failure", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        db.insert("after_failure", {"id": "a", "body": "still writable"})
+        assert db.count("after_failure") == 1
+        db.close()
+
+    def test_force_rebuild_does_not_leak_chroma_systems(self, tmp_dir):
+        """Each rebuild used to leave a Chroma System cached under the temp
+        path, holding an open handle to a directory that no longer exists."""
+        from chromadb.api.shared_system_client import SharedSystemClient
+
+        if not hasattr(SharedSystemClient, "_identifier_to_system"):
+            pytest.skip("chromadb internals changed; cache layout not observable")
+
+        db = self._make_db(tmp_dir)
+        before = set(SharedSystemClient._identifier_to_system)
+        for _ in range(3):
+            assert db.force_rebuild_chroma_index()["status"] == "rebuilt"
+        leaked = set(SharedSystemClient._identifier_to_system) - before
+        assert leaked == set(), f"rebuild leaked Chroma Systems: {sorted(leaked)}"
+        db.close()
+
     def test_closed_instance_does_not_block_force_rebuild(self, tmp_dir):
         db1 = self._make_db(tmp_dir)
         db2 = HybridDB(tmp_dir, embedding_fn=_mock_embedding)

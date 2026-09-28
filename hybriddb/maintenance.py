@@ -141,6 +141,8 @@ class MaintenanceMixin:
         key = os.fspath(old_path)
         temp_root = Path(tempfile.mkdtemp(dir=old_path.parent, prefix="chroma_rebuild_"))
         temp_vectors = temp_root / "vectors"
+        temp_key = os.fspath(temp_vectors)
+        evicted = False
         try:
             new_client = chromadb.PersistentClient(
                 path=str(temp_vectors),
@@ -177,6 +179,7 @@ class MaintenanceMixin:
             # directory moves: the System's open SQLite handle must not survive
             # the swap, and the client built below must not re-attach to it.
             _evict_chroma_path_clients(key)
+            evicted = True
             backup_path = old_path.with_suffix(
                 old_path.suffix + ".backup_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
             )
@@ -196,7 +199,21 @@ class MaintenanceMixin:
             logger.info("chromadb.index_rebuilt old_backup=%s new_path=%s", str(backup_path), str(old_path))
         except Exception:
             shutil.rmtree(str(temp_root), ignore_errors=True)
+            if evicted:
+                # The cache was already dropped, so self._chroma now points at a
+                # stopped System. Re-attach to the unchanged directory so a failed
+                # rebuild leaves the instance usable instead of bricking it.
+                self._chroma = None
+                try:
+                    self._init_chroma(force=True)
+                except Exception:  # noqa: BLE001 - degrade as a fresh init would
+                    logger.exception("chroma_reinit_failed_after_rebuild path=%s", old_path)
             raise
+        finally:
+            # The temp-path System holds an open SQLite handle to the directory
+            # that was just moved away (or discarded on failure). Without this,
+            # every rebuild leaks one Chroma System per call.
+            _evict_chroma_path_clients(temp_key)
 
     def force_rebuild_chroma_index(self, force: bool = False) -> dict:
         """Rebuild the Chroma index into a fresh directory and swap it in.
