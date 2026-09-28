@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.3] — 2026-09-28
+
+### Fixed
+
+- **0.8.1/0.8.2 broke the declared `chromadb` floor.** The per-path eviction
+  added in 0.8.1 read `SharedSystemClient._identifier_to_refcount`, a private
+  attribute that only exists from chromadb 1.5.2. On 1.5.0/1.5.1 — both inside
+  HybridDB's declared `chromadb>=1.5.0,<2.0` — `force_rebuild_chroma_index()`
+  and `restore()` raised `AttributeError` deterministically, i.e. the fix for
+  #1 was itself unusable. Reported in #1. The refcount table is now
+  feature-detected: on 1.5.0/1.5.1 there is no such table, so there is nothing
+  to evict and the step is skipped. The system-cache eviction and `stop()` stay
+  unconditional. Covered by a regression test that exercises the guard against
+  chromadb's 1.5.0 surface.
+
 ## [0.8.2] — 2026-09-28
 
 ### Fixed

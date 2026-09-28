@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import weakref
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -123,13 +123,20 @@ def _evict_chroma_path_clients(vector_path: str) -> None:
     client re-attaches to the stale System. Deliberately scoped to one path:
     ``SharedSystemClient.clear_system_cache()`` wipes every path, which would
     break clients for unrelated databases in the same process.
+
+    ``_identifier_to_refcount`` only exists from chromadb 1.5.2; on 1.5.0/1.5.1
+    SharedSystemClient has no refcount table, so there is nothing extra to evict
+    and the attribute is skipped rather than raising (issue #1 regression).
     """
     from chromadb.api.shared_system_client import SharedSystemClient
 
     with _chroma_pool_lock:
         _chroma_client_pool.pop(vector_path, None)
         system = SharedSystemClient._identifier_to_system.pop(vector_path, None)
-        SharedSystemClient._identifier_to_refcount.pop(vector_path, None)
+        refcounts = getattr(SharedSystemClient, "_identifier_to_refcount", None)
+        if refcounts is not None:
+            with getattr(SharedSystemClient, "_refcount_lock", nullcontext()):
+                refcounts.pop(vector_path, None)
     if system is not None:
         try:
             system.stop()

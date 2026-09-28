@@ -737,6 +737,42 @@ class TestChromaDirectorySwap:
         assert db.count("after_rollback") == 1
         db.close()
 
+    def test_eviction_works_on_chromadb_floor_without_refcount_table(
+        self, tmp_dir, monkeypatch,
+    ):
+        """chromadb 1.5.0/1.5.1 have no SharedSystemClient._identifier_to_refcount
+        (added in 1.5.2). HybridDB declares >=1.5.0, so eviction must feature-detect
+        it instead of raising — this broke 0.8.1/0.8.2 on the declared floor.
+
+        A stub stands in for the 1.5.0 class rather than deleting the real
+        attributes: on chromadb >=1.5.2 Chroma's own __init__ needs the refcount
+        table, so removing it would break the library instead of exercising our
+        guard.
+        """
+        import chromadb.api.shared_system_client as ssc
+
+        from hybriddb.db import _evict_chroma_path_clients
+
+        class _FakeSystem:
+            def __init__(self):
+                self.stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+        class _FloorSharedSystemClient:
+            """The relevant chromadb 1.5.0 surface: a system cache, no refcounts."""
+
+            _identifier_to_system: dict = {}
+
+        system = _FakeSystem()
+        _FloorSharedSystemClient._identifier_to_system = {"/some/vectors": system}
+        monkeypatch.setattr(ssc, "SharedSystemClient", _FloorSharedSystemClient)
+
+        _evict_chroma_path_clients("/some/vectors")  # must not raise on the floor
+        assert _FloorSharedSystemClient._identifier_to_system == {}
+        assert system.stopped, "system was not stopped on the floor path"
+
     def test_force_rebuild_does_not_leak_chroma_systems(self, tmp_dir):
         """Each rebuild used to leave a Chroma System cached under the temp
         path, holding an open handle to a directory that no longer exists."""
