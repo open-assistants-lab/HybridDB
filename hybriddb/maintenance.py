@@ -187,6 +187,9 @@ class MaintenanceMixin:
             # Drop the pooled client AND Chroma's per-path System *before* the
             # directory moves: the System's open SQLite handle must not survive
             # the swap, and the client built below must not re-attach to it.
+            # Flag first, so a concurrent write on this instance waits for the
+            # swap on the per-path lock instead of using the dying client.
+            self._chroma_stale = True
             _evict_chroma_path_clients(key)
             evicted = True
             backup_path = old_path.with_suffix(
@@ -206,6 +209,7 @@ class MaintenanceMixin:
             self._chroma = chromadb.PersistentClient(
                 path=str(old_path), settings=ChromaSettings(anonymized_telemetry=False),
             )
+            self._chroma_stale = False
             with _chroma_pool_lock:
                 _chroma_client_pool[key] = self._chroma
             _register_chroma_path_holder(key, self)
@@ -221,6 +225,8 @@ class MaintenanceMixin:
                     self._init_chroma(force=True)
                 except Exception:  # noqa: BLE001 - degrade as a fresh init would
                     logger.exception("chroma_reinit_failed_after_rebuild path=%s", old_path)
+                if self._chroma is not None:
+                    self._chroma_stale = False
             raise
         finally:
             # The temp-path System holds an open SQLite handle to the directory
@@ -247,6 +253,7 @@ class MaintenanceMixin:
         if self._chroma is None:
             return {"status": "unavailable", "error": "ChromaDB not initialized"}
         from hybriddb.db import other_chroma_path_holders
+        self._ensure_chroma_client()
         others = other_chroma_path_holders(self._vector_path, self)
         if others and not force:
             raise RuntimeError(
@@ -273,7 +280,39 @@ class MaintenanceMixin:
                 return [0.0] * EMBEDDING_DIM
         return self._embedding_fn(text)
 
+    def _ensure_chroma_client(self) -> None:
+        """Re-attach a Chroma client if this instance's was invalidated.
+
+        A directory swap (force_rebuild_chroma_index / restore) stops the old
+        System before the new directory is in place, and close() may release the
+        client outright. Either way, operations on this instance would otherwise
+        hit a dead client — and a *write* would raise even though its row was
+        already committed, which reads as a failed write that actually
+        succeeded (retrying duplicates rows on tables without an explicit PK).
+
+        The fast path is a single flag check with no lock, so concurrent
+        searches are not serialised. Only when the flag is set do we take the
+        per-path lock, which the swap already holds, and re-attach to whatever
+        client is pooled once the swap completes.
+        """
+        if not self._chroma_stale:
+            return
+        from hybriddb.db import chroma_path_lock
+        key = os.fspath(self._vector_path)
+        with chroma_path_lock(key):
+            if not self._chroma_stale:  # another thread already re-attached
+                return
+            self._chroma = None
+            try:
+                self._init_chroma_locked(key, True)
+            except Exception:  # noqa: BLE001 - degrade as a fresh init would
+                logger.exception("chroma_ensure_client_failed path=%s", self._vector_path)
+                return
+            if self._chroma is not None:
+                self._chroma_stale = False
+
     def _get_collection(self, name: str):
+        self._ensure_chroma_client()
         if self._chroma is None:
             return None
         coll = self._chroma.get_or_create_collection(name=name)
@@ -414,9 +453,18 @@ class MaintenanceMixin:
             except Exception:
                 pass
         if self._chroma is not None:
-            # A closed instance must not block a later directory swap.
-            from hybriddb.db import _release_chroma_path_holder
+            # A closed instance must not block a later directory swap, and its
+            # client may be released below if it was the last holder — so mark
+            # it stale and let _ensure_chroma_client() re-attach on next use.
+            from hybriddb.db import (
+                _drain_pending_chroma_evictions,
+                _release_chroma_path_holder,
+                _sweep_collected_chroma_holders,
+            )
             _release_chroma_path_holder(self._vector_path, self)
+            self._chroma_stale = True
+            _sweep_collected_chroma_holders()
+            _drain_pending_chroma_evictions()
 
     # ── Import/Export & SQL Utilities ──────────────────────────────────────
 
@@ -480,9 +528,12 @@ class MaintenanceMixin:
 
                 # Drop Chroma's cached System for this path too: it holds an open
                 # SQLite handle to the directory restore() is about to replace.
+                self._chroma_stale = True
                 _evict_chroma_path_clients(str(self._vector_path))
                 self._chroma = None
                 self._init_chroma(force=True)
+                if self._chroma is not None:
+                    self._chroma_stale = False
 
             if self._duckdb_conn is not None:
                 try:

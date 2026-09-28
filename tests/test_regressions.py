@@ -797,3 +797,124 @@ class TestChromaDirectorySwap:
         # db2 is closed, so db1 is the only live holder and may rebuild.
         assert db1.force_rebuild_chroma_index()["status"] == "rebuilt"
         db1.close()
+
+
+class TestChromaStaleClientAndClose:
+    """#3: a write during a directory swap must not be reported as failed.
+
+    Before this, an insert landing in the swap window raised AttributeError even
+    though the row was committed and the journal later applied the vector — a
+    false failure on a durable write, which invites duplicate rows on retry.
+    #4: close() must release the client when it is the last holder.
+    """
+
+    @staticmethod
+    def _make_db(tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        db.create_table("msgs", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        for i in range(5):
+            db.insert("msgs", {"id": f"m{i}", "body": f"message {i} alpha"})
+        return db
+
+    def test_write_during_own_swap_succeeds_instead_of_false_failing(
+        self, tmp_dir, monkeypatch,
+    ):
+        import threading
+        import time
+
+        import hybriddb.maintenance as maintenance
+
+        db = self._make_db(tmp_dir)
+        real_rename = maintenance.os.rename
+
+        def slow_rename(src, dst):
+            result = real_rename(src, dst)
+            time.sleep(1.5)  # instance's client is dead for this window
+            return result
+
+        monkeypatch.setattr(maintenance.os, "rename", slow_rename)
+        thread = threading.Thread(target=db.force_rebuild_chroma_index)
+        thread.start()
+        time.sleep(0.5)
+
+        # Capture the failure rather than letting it abort the test, so the
+        # assertion below reports the real defect.
+        failure = {}
+        try:
+            db.insert("msgs", {"id": "during", "body": "written during the swap"})
+        except Exception as exc:  # noqa: BLE001 - the bug under test
+            failure["exc"] = exc
+        thread.join()
+        monkeypatch.undo()
+
+        assert "exc" not in failure, (
+            f"write during swap raised {type(failure.get('exc')).__name__}: "
+            f"{failure.get('exc')}"
+        )
+        assert db.count("msgs") == 6
+        assert db._get_collection("msgs_body").count() == 6
+        assert any(r["id"] == "during" for r in db.search("msgs", "body", "during"))
+        db.close()
+
+    def test_close_releases_client_when_last_holder(self, tmp_dir):
+        from chromadb.api.shared_system_client import SharedSystemClient
+
+        from hybriddb.db import _chroma_client_pool
+
+        db = self._make_db(tmp_dir)
+        path = db._vector_path
+        assert path in _chroma_client_pool
+        assert path in SharedSystemClient._identifier_to_system
+
+        db.close()
+        assert path not in _chroma_client_pool, "client retained after last holder closed"
+        assert path not in SharedSystemClient._identifier_to_system
+
+    def test_close_keeps_client_alive_while_another_instance_uses_it(self, tmp_dir):
+        from hybriddb.db import _chroma_client_pool
+
+        db1 = self._make_db(tmp_dir)
+        db2 = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        assert db1._chroma is db2._chroma
+
+        db2.close()  # NOT the last holder
+        assert db1._vector_path in _chroma_client_pool
+        # db1 must be entirely unaffected
+        assert db1.count("msgs") == 5
+        db1.insert("msgs", {"id": "after", "body": "still writable"})
+        assert db1.count("msgs") == 6
+        db1.close()
+
+    def test_dropped_instance_does_not_pin_its_client(self, tmp_dir):
+        import gc
+
+        from chromadb.api.shared_system_client import SharedSystemClient
+
+        from hybriddb.db import _chroma_client_pool
+
+        keep = self._make_db(tmp_dir)
+        doomed_path = keep._vector_path
+
+        with tempfile.TemporaryDirectory() as other:
+            orphan = HybridDB(other, embedding_fn=_mock_embedding)
+            orphan_path = orphan._vector_path
+            assert orphan_path in _chroma_client_pool
+            del orphan
+            gc.collect()
+
+        # A later construction drains paths whose last holder was collected.
+        HybridDB(tempfile.mkdtemp(), embedding_fn=_mock_embedding)
+        assert orphan_path not in _chroma_client_pool
+        assert orphan_path not in SharedSystemClient._identifier_to_system
+        assert doomed_path in _chroma_client_pool
+        keep.close()
+
+    def test_closed_instance_can_still_rebuild(self, tmp_dir):
+        """close() is a partial close; a rebuild on the closed instance must
+        re-attach rather than use the released client."""
+        db = self._make_db(tmp_dir)
+        db.close()
+        assert db.force_rebuild_chroma_index()["status"] == "rebuilt"
+        db.create_table("later", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        db.insert("later", {"id": "a", "body": "usable after close"})
+        assert db.count("later") == 1

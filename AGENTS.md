@@ -121,7 +121,18 @@ while another live instance holds the path (`force=True` overrides), and
 `chroma_path_lock()` serialises client acquisition against the swap — always
 take it *before* `_chroma_pool_lock`. Place the rebuilt directory with
 `os.rename`, never `shutil.move`: rename fails loudly on a non-empty target,
-`shutil.move` nests it as `vectors/vectors/` and reports success.
+`shutil.move` nests it as `vectors/vectors/` and reports success. A swap stops
+the old `System` before the new one exists, so mark `self._chroma_stale` first:
+every Chroma path goes through `_get_collection()` (search, crud, journal), and
+that is where the lazy re-attach under the path lock lives — without it a write
+lands in SQLite and then raises, i.e. a *durable write reported as failed*.
+Never evict the pooled client on `close()` directly: the pool is process-wide
+and another instance may share it. Evict only on **last-holder release**
+(`_release_chroma_path_holder`), and detect collected-without-`close()` holders
+by sweeping empty `WeakSet`s at a safe point — never from a weakref callback,
+since stopping a Chroma System during GC risks deadlock. Do not prune
+`_chroma_path_locks`: a waiter may still hold the old lock, and swapping the
+entry would break mutual exclusion.
 
 **Long documents** are chunked above the engine (`hybriddb.chunking` +
 chunks-as-rows with a parent link) — one embedding per LONGTEXT cell is the

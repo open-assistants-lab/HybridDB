@@ -16,7 +16,7 @@ Expected current results:
 
 ```text
 ruff: All checks passed
-pytest: 272 passed, 48 skipped
+pytest: 277 passed, 48 skipped
 benchmark smoke: 48 passed
 ```
 
@@ -33,7 +33,7 @@ unguarded access there broke `force_rebuild_chroma_index()` and `restore()`
 for CV in 1.5.0 1.5.1; do
   uv run --no-project --isolated --no-cache --refresh \
     --with "chromadb==$CV" \
-    --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.8.3-py3-none-any.whl \
+    --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.8.4-py3-none-any.whl \
     python -c "
 import chromadb, tempfile
 from chromadb.api.shared_system_client import SharedSystemClient
@@ -71,11 +71,11 @@ rm -rf dist
 uv build
 ```
 
-Expected files for version `0.8.3`:
+Expected files for version `0.8.4`:
 
 ```text
-dist/hybriddb-0.8.3.tar.gz
-dist/hybriddb-0.8.3-py3-none-any.whl
+dist/hybriddb-0.8.4.tar.gz
+dist/hybriddb-0.8.4-py3-none-any.whl
 ```
 
 ## Wheel Smoke Test
@@ -84,7 +84,7 @@ Run an isolated install test from outside the repo:
 
 ```bash
 uv run --no-project --isolated --no-cache \
-  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.8.3-py3-none-any.whl \
+  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.8.4-py3-none-any.whl \
   --with duckdb \
   python - <<'PY'
 import asyncio
@@ -141,7 +141,7 @@ Or configure trusted publishing in PyPI and run the same command from the truste
 After PyPI release:
 
 ```bash
-uv run --no-project --isolated --no-cache --with hybriddb==0.8.3 python - <<'PY'
+uv run --no-project --isolated --no-cache --with hybriddb==0.8.4 python - <<'PY'
 from tempfile import TemporaryDirectory
 from hybriddb import HybridDB, LONGTEXT
 

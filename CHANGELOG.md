@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.8.4] — 2026-09-28
+
+### Fixed
+
+- **A write during a Chroma directory swap is no longer reported as failed**
+  (issue #3). `force_rebuild_chroma_index()` / `restore()` stop the old Chroma
+  `System` before the new directory is in place, so a concurrent write on the
+  same instance hit a dead client and raised `AttributeError` — *after* the row
+  was already committed to SQLite, with the journal later applying the vector.
+  Callers were told a durable write had failed; retrying on a table without an
+  explicit primary key inserted a duplicate row. A `_chroma_stale` flag now
+  marks the window and `_get_collection()` (the single accessor that search,
+  insert, update, delete and the journal apply already funnel through)
+  re-attaches under the per-path lock. The fast path is one boolean check with
+  no lock, so concurrent searches are not serialised.
+- **`close()` now releases the Chroma client when it is the last holder**
+  (issue #4). The process-wide pool held a strong reference, so a client, its
+  `System`, its SQLite handle and its resident HNSW index were retained for the
+  life of the process; opening 8 databases and closing them left 8 of each.
+  Eviction now happens on last-holder release, and paths whose holders were
+  garbage-collected without `close()` are swept at the next safe point.
+  Measured: 8 open/close cycles went from `(8 clients, 8 systems)` to `(0, 0)`.
+  A closed instance re-attaches lazily rather than dying, so
+  `force_rebuild_chroma_index()` still works after `close()`.
+
+### Notes
+
+- The per-path lock registry (`_chroma_path_locks`) is deliberately *not*
+  pruned: a waiter may still hold a reference to it, and replacing the entry
+  would let two threads into the same critical section. An `RLock` is
+  negligible next to a retained client, `System`, handle and index.
+- `check_integrity()` reports index/segment health, not row-vs-vector
+  reconciliation — use `reconcile()` to answer drift questions.
+
 ## [0.8.3] — 2026-09-28
 
 ### Fixed

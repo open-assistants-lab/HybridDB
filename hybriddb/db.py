@@ -57,6 +57,9 @@ _chroma_pool_lock = threading.Lock()
 # process-global operation, so those paths must know whether another instance
 # would be left holding a client bound to the replaced directory.
 _chroma_path_holders: dict[str, "weakref.WeakSet[Any]"] = {}
+# Paths whose last holder has gone, awaiting a safe point at which their Chroma
+# client/System can actually be released (see _drain_pending_chroma_evictions).
+_chroma_evict_pending: set[str] = set()
 # Per-path re-entrant lock serialising Chroma client *acquisition* against the
 # directory swaps in force_rebuild_chroma_index / restore. Without it, a
 # HybridDB constructed mid-swap re-attaches to the outgoing directory (or, if
@@ -90,7 +93,11 @@ def _register_chroma_path_holder(vector_path: str, db: Any) -> None:
 
 
 def _release_chroma_path_holder(vector_path: str, db: Any) -> None:
-    """Forget `db` as a holder (called on close(); GC drops it via weakrefs)."""
+    """Forget `db` as a holder (called on close()).
+
+    When the last holder goes, the path is enqueued for eviction and
+    ``_drain_pending_chroma_evictions()`` performs it.
+    """
     with _chroma_pool_lock:
         holders = _chroma_path_holders.get(vector_path)
         if holders is None:
@@ -98,6 +105,44 @@ def _release_chroma_path_holder(vector_path: str, db: Any) -> None:
         holders.discard(db)
         if not holders:
             _chroma_path_holders.pop(vector_path, None)
+            _chroma_evict_pending.add(vector_path)
+
+
+def _sweep_collected_chroma_holders() -> None:
+    """Enqueue paths whose holders were all garbage-collected (never closed).
+
+    A holder set that is still present but empty means every instance holding it
+    was collected without calling close(); the pool's strong reference to the
+    client would otherwise pin it for the life of the process.
+
+    Detected by sweeping rather than from a weakref callback on purpose: the
+    actual eviction stops a Chroma System, and doing that work inside garbage
+    collection risks deadlock. Sweeping only costs anything when the registry is
+    touched again, and a process that never touches HybridDB again is idle.
+    """
+    with _chroma_pool_lock:
+        collected = [p for p, holders in _chroma_path_holders.items() if not holders]
+        for path in collected:
+            _chroma_path_holders.pop(path, None)
+            _chroma_evict_pending.add(path)
+
+
+def _drain_pending_chroma_evictions() -> None:
+    """Release clients/Systems for paths whose last holder has gone.
+
+    Call only from a normal thread (never from a GC callback): it stops Chroma
+    Systems. The per-path lock is intentionally *not* dropped — a waiter may
+    still hold a reference to it, and replacing the dict entry would let two
+    threads into the same critical section. An RLock is negligible next to a
+    retained client, System, SQLite handle and HNSW index.
+    """
+    with _chroma_pool_lock:
+        if not _chroma_evict_pending:
+            return
+        pending = list(_chroma_evict_pending)
+        _chroma_evict_pending.clear()
+    for vector_path in pending:
+        _evict_chroma_path_clients(vector_path)
 
 
 def other_chroma_path_holders(vector_path: str, db: Any) -> int:
@@ -207,6 +252,9 @@ class HybridDB(
         self.olap = AnalyticsAPI(self)
 
         self._chroma = None
+        # Set when this instance's client was invalidated (directory swap, or
+        # release on close). Cleared once a fresh client is attached.
+        self._chroma_stale = False
         self._nx_cache: dict[str, Any] = {"graph": None, "dirty": True, "directed": None}
 
         self._init_system_tables()
@@ -293,6 +341,11 @@ class HybridDB(
             self._init_chroma_locked(key, force)
 
     def _init_chroma_locked(self, key: str, force: bool) -> None:
+        # Safe point to release clients for paths nobody holds any more. Must
+        # run before acquiring: the caller is a holder of `key` that does not
+        # yet have a client, so evicting here cannot strand a live user.
+        _sweep_collected_chroma_holders()
+        _drain_pending_chroma_evictions()
         with _chroma_pool_lock:
             if key in _chroma_client_pool:
                 try:
