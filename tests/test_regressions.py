@@ -670,6 +670,73 @@ class TestChromaDirectorySwap:
         assert db.count("after_failure") == 1
         db.close()
 
+    def test_concurrent_construction_waits_for_directory_swap(self, tmp_dir):
+        """A HybridDB constructed while vectors/ is being swapped must wait,
+        then attach to the new directory -- not the outgoing one."""
+        import threading
+
+        from hybriddb.db import chroma_path_lock
+
+        db = self._make_db(tmp_dir)
+        done = threading.Event()
+        result = {}
+
+        def construct():
+            result["db"] = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+            done.set()
+
+        # Stand in for a swap in progress: hold the path lock, then release it
+        # only after confirming the constructor is blocked.
+        with chroma_path_lock(db._vector_path):
+            t = threading.Thread(target=construct)
+            t.start()
+            assert not done.wait(1.0), "constructor did not block during swap"
+        assert done.wait(30.0), "constructor never completed after swap released"
+        t.join()
+        other = result["db"]
+        # It attached to a live, usable store rather than a stranded client.
+        assert other.count("msgs") == 5
+        other.create_table("from_other", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        assert other.count("from_other") == 0
+        other.close()
+        db.close()
+
+    def test_recreated_vectors_dir_fails_loudly_instead_of_nesting(self, tmp_dir, monkeypatch):
+        """A vectors/ recreated mid-swap must not swallow the rebuilt data as
+        vectors/vectors/ while the rebuild reports success."""
+        import os
+
+        import hybriddb.maintenance as maintenance
+
+        db = self._make_db(tmp_dir)
+        real_rename = maintenance.os.rename
+        seen = {"n": 0}
+
+        def rename_then_recreate(src, dst):
+            seen["n"] += 1
+            result = real_rename(src, dst)
+            if seen["n"] == 1:
+                # Simulate a concurrent HybridDB.__init__ recreating vectors/
+                # and populating it, landing in the gap between the two moves.
+                os.makedirs(os.path.join(db._vector_path, "chroma.sqlite"), exist_ok=True)
+                with open(os.path.join(db._vector_path, "sentinel"), "w") as fh:
+                    fh.write("concurrent")
+            return result
+
+        monkeypatch.setattr(maintenance.os, "rename", rename_then_recreate)
+        with pytest.raises(OSError):
+            db.force_rebuild_chroma_index()
+        monkeypatch.undo()
+
+        # No nesting, and the original data was rolled back into place.
+        assert not os.path.exists(os.path.join(db._vector_path, "vectors"))
+        assert os.path.exists(os.path.join(db._vector_path, "chroma.sqlite"))
+        assert db.count("msgs") == 5
+        db.create_table("after_rollback", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        db.insert("after_rollback", {"id": "a", "body": "usable"})
+        assert db.count("after_rollback") == 1
+        db.close()
+
     def test_force_rebuild_does_not_leak_chroma_systems(self, tmp_dir):
         """Each rebuild used to leave a Chroma System cached under the temp
         path, holding an open handle to a directory that no longer exists."""

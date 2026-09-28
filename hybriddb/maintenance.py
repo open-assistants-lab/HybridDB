@@ -131,14 +131,23 @@ class MaintenanceMixin:
     def _rebuild_chroma_index(self) -> None:
         if self._chroma is None:
             return
+        from hybriddb.db import chroma_path_lock
+        old_path = Path(self._vector_path)
+        key = os.fspath(old_path)
+        # Serialise against HybridDB construction on this path for the whole
+        # swap, so no client can be acquired against the outgoing directory
+        # while vectors/ is being replaced. Re-entrant: the failure path below
+        # re-initialises the client through _init_chroma.
+        with chroma_path_lock(key):
+            self._rebuild_chroma_index_locked(key, old_path)
+
+    def _rebuild_chroma_index_locked(self, key: str, old_path: Path) -> None:
         from hybriddb.db import (
             _chroma_client_pool,
             _chroma_pool_lock,
             _evict_chroma_path_clients,
             _register_chroma_path_holder,
         )
-        old_path = Path(self._vector_path)
-        key = os.fspath(old_path)
         temp_root = Path(tempfile.mkdtemp(dir=old_path.parent, prefix="chroma_rebuild_"))
         temp_vectors = temp_root / "vectors"
         temp_key = os.fspath(temp_vectors)
@@ -185,7 +194,11 @@ class MaintenanceMixin:
             )
             shutil.move(str(old_path), str(backup_path))
             try:
-                shutil.move(str(temp_vectors), str(old_path))
+                # os.rename, not shutil.move: rename refuses a non-empty target
+                # (ENOTEMPTY) whereas shutil.move would nest the rebuilt data
+                # inside it as vectors/vectors/ and report success. A directory
+                # recreated concurrently now fails loudly and rolls back.
+                os.rename(str(temp_vectors), str(old_path))
             except Exception:
                 shutil.move(str(backup_path), str(old_path))
                 raise
@@ -460,15 +473,16 @@ class MaintenanceMixin:
                 ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
                 old = self.path.with_suffix(self.path.suffix + f".old_{ts}")
 
-            shutil.move(str(self.path), str(old))
-            shutil.copytree(str(src), str(self.path), dirs_exist_ok=True)
+            from hybriddb.db import _evict_chroma_path_clients, chroma_path_lock
+            with chroma_path_lock(str(self._vector_path)):
+                shutil.move(str(self.path), str(old))
+                shutil.copytree(str(src), str(self.path), dirs_exist_ok=True)
 
-            from hybriddb.db import _evict_chroma_path_clients
-            # Drop Chroma's cached System for this path too: it holds an open
-            # SQLite handle to the directory restore() is about to replace.
-            _evict_chroma_path_clients(str(self._vector_path))
-            self._chroma = None
-            self._init_chroma(force=True)
+                # Drop Chroma's cached System for this path too: it holds an open
+                # SQLite handle to the directory restore() is about to replace.
+                _evict_chroma_path_clients(str(self._vector_path))
+                self._chroma = None
+                self._init_chroma(force=True)
 
             if self._duckdb_conn is not None:
                 try:

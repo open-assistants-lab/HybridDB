@@ -57,6 +57,26 @@ _chroma_pool_lock = threading.Lock()
 # process-global operation, so those paths must know whether another instance
 # would be left holding a client bound to the replaced directory.
 _chroma_path_holders: dict[str, "weakref.WeakSet[Any]"] = {}
+# Per-path re-entrant lock serialising Chroma client *acquisition* against the
+# directory swaps in force_rebuild_chroma_index / restore. Without it, a
+# HybridDB constructed mid-swap re-attaches to the outgoing directory (or, if
+# it recreates vectors/ in the gap between the two moves, ends up nested in
+# vectors/vectors/). One lock per vector path, never per instance.
+_chroma_path_locks: dict[str, threading.RLock] = {}
+
+
+def chroma_path_lock(vector_path: str) -> threading.RLock:
+    """Return the per-path lock guarding acquisition vs. directory swap.
+
+    Re-entrant: the swap path re-acquires it when re-initialising a client after
+    a failure. Always acquired *before* _chroma_pool_lock to keep one order.
+    """
+    with _chroma_pool_lock:
+        lock = _chroma_path_locks.get(vector_path)
+        if lock is None:
+            lock = threading.RLock()
+            _chroma_path_locks[vector_path] = lock
+        return lock
 
 
 def _register_chroma_path_holder(vector_path: str, db: Any) -> None:
@@ -262,6 +282,10 @@ class HybridDB(
 
     def _init_chroma(self, force: bool = False) -> None:
         key = os.fspath(self._vector_path)
+        with chroma_path_lock(key):
+            self._init_chroma_locked(key, force)
+
+    def _init_chroma_locked(self, key: str, force: bool) -> None:
         with _chroma_pool_lock:
             if key in _chroma_client_pool:
                 try:

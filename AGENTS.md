@@ -117,7 +117,11 @@ post-swap client is built first and would re-attach to the stale System).
 Never call `SharedSystemClient.clear_system_cache()` — it wipes every path and
 breaks unrelated databases; the per-path eviction is the correct scope.
 Directory swaps are process-global: `force_rebuild_chroma_index()` refuses
-while another live instance holds the path (`force=True` overrides).
+while another live instance holds the path (`force=True` overrides), and
+`chroma_path_lock()` serialises client acquisition against the swap — always
+take it *before* `_chroma_pool_lock`. Place the rebuilt directory with
+`os.rename`, never `shutil.move`: rename fails loudly on a non-empty target,
+`shutil.move` nests it as `vectors/vectors/` and reports success.
 
 **Long documents** are chunked above the engine (`hybriddb.chunking` +
 chunks-as-rows with a parent link) — one embedding per LONGTEXT cell is the

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.2] — 2026-09-28
+
+### Fixed
+
+- **Closed the residual race between client acquisition and the `vectors/`
+  directory swap** (issue #2). A per-path re-entrant lock now serialises
+  `HybridDB` construction on a path against `force_rebuild_chroma_index()` /
+  `restore()`, so a constructor can no longer attach to the outgoing directory
+  while it is being replaced.
+- **A `vectors/` directory recreated mid-swap now fails loudly instead of
+  silently mis-nesting the rebuilt data.** The final placement uses
+  `os.rename()` rather than `shutil.move()`: rename refuses a non-empty target
+  (`ENOTEMPTY`) and the swap rolls back, whereas `shutil.move()` nested the
+  rebuilt store inside the recreated directory as `vectors/vectors/` and the
+  call still reported success. Reproduced on 0.8.1 — the rebuild returned
+  `{'status': 'rebuilt', 'vectors_copied': 0}` with the real data one level
+  down and `chroma.sqlite` replaced by a directory.
+
+### Known limitations
+
+- Concurrent operations on an *already-open* instance are still not serialised
+  against its own directory swap (tracked in #3). Closing that would require
+  locking every Chroma access, which would serialise concurrent searches.
+
 ## [0.8.1] — 2026-09-28
 
 ### Fixed
