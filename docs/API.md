@@ -284,6 +284,17 @@ db.stats()                         # size and count statistics for all storage l
 db.close()                         # close handles
 ```
 
+> **`force_rebuild_chroma_index()` is process-global, not per-instance.**
+> All `HybridDB` objects in a process share one Chroma client per vector path
+> (`hybriddb.db._chroma_client_pool`). The rebuild replaces the Chroma directory
+> and swaps that pooled client, which can leave other live instances on the same
+> path holding a client whose view of the directory is stale — a subsequent
+> `list_collections()`/`count()` can then raise
+> `chromadb.errors.NotFoundError`. `SharedSystemClient.clear_system_cache()` is
+> never called by the rebuild. Call it from a quiesced process, and prefer
+> `reindex()` where it suffices. Tracked in
+> open-assistants-lab/assistant#49.
+
 Export/import as portable SQL (FTS5 is excluded from dumps and rebuilt on
 import):
 
