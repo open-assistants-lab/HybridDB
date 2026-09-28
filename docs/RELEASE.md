@@ -16,7 +16,7 @@ Expected current results:
 
 ```text
 ruff: All checks passed
-pytest: 262 passed, 48 skipped
+pytest: 269 passed, 48 skipped
 benchmark smoke: 48 passed
 ```
 
@@ -27,11 +27,11 @@ rm -rf dist
 uv build
 ```
 
-Expected files for version `0.5.6`:
+Expected files for version `0.8.1`:
 
 ```text
-dist/hybriddb-0.5.6.tar.gz
-dist/hybriddb-0.5.6-py3-none-any.whl
+dist/hybriddb-0.8.1.tar.gz
+dist/hybriddb-0.8.1-py3-none-any.whl
 ```
 
 ## Wheel Smoke Test
@@ -40,7 +40,7 @@ Run an isolated install test from outside the repo:
 
 ```bash
 uv run --no-project --isolated --no-cache \
-  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.5.6-py3-none-any.whl \
+  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.8.1-py3-none-any.whl \
   --with duckdb \
   python - <<'PY'
 import asyncio
@@ -97,7 +97,7 @@ Or configure trusted publishing in PyPI and run the same command from the truste
 After PyPI release:
 
 ```bash
-uv run --no-project --isolated --no-cache --with hybriddb==0.5.6 python - <<'PY'
+uv run --no-project --isolated --no-cache --with hybriddb==0.8.1 python - <<'PY'
 from tempfile import TemporaryDirectory
 from hybriddb import HybridDB, LONGTEXT
 
