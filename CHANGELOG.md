@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`force_rebuild_chroma_index()` no longer strands live Chroma clients**
+  (issue #1). The rebuild replaces the `vectors/` directory, but ChromaDB caches
+  one `System` per `persist_directory` holding an open SQLite handle to
+  `chroma.sqlite`. Swapping the directory left that handle bound to the
+  moved-away inode, so **every later read and write through the shared client
+  failed** — reproduced as `InternalError: (code: 1032) attempt to write a
+  readonly database` (`SQLITE_READONLY_DBMOVED`) on ordinary calls such as
+  `create_table()` after a rebuild, and as a stale-collection
+  `NotFoundError` in the same path. Three fixes:
+  - The rebuild now drops Chroma's cached per-path `System` (and the pooled
+    client) **before** the directory moves, so the rebuilt client binds to the
+    new directory. Scoped to the one path on purpose:
+    `SharedSystemClient.clear_system_cache()` wipes *every* path and would break
+    unrelated databases in the same process. Clearing after the swap does not
+    work — the post-swap client is constructed first and re-attaches to the
+    stale `System`.
+  - `force_rebuild_chroma_index()` now raises `RuntimeError` while another live
+    instance holds the same path, since that instance cannot be repaired.
+    Pass `force=True` to override (other instances are left unbound);
+    `db.close()` releases a path so it no longer blocks a rebuild.
+  - `restore()` had the same defect and now applies the same invalidation.
+  - `auto_rebuild_chroma=True` skips (with a warning) instead of failing
+    construction when the path is shared.
+
 ## [0.8.0] — 2026-09-03
 
 ### Changed

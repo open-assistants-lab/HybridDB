@@ -576,3 +576,79 @@ class TestLazyDuckdbRegistration:
         assert db.olap.query("SELECT count(*) AS c FROM later")[0]["c"] == 1
         assert "later" in db._duckdb_synced_tables
         db.close()
+
+
+class TestChromaDirectorySwap:
+    """Rebuilding/restoring replaces the vectors/ directory under Chroma.
+
+    ChromaDB caches one System per persist_directory, holding an open SQLite
+    handle to chroma.sqlite. Replacing the directory without dropping that
+    cache leaves the handle bound to the moved-away inode, so every later
+    read/write through the shared client fails (SQLITE_READONLY_DBMOVED, or a
+    NotFoundError naming a stale collection ID).
+    """
+
+    @staticmethod
+    def _make_db(tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        db.create_table("msgs", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        for i in range(5):
+            db.insert("msgs", {"id": f"m{i}", "body": f"message {i} alpha"})
+        return db
+
+    def test_force_rebuild_leaves_instance_writable_after_directory_swap(self, tmp_dir):
+        db = self._make_db(tmp_dir)
+        assert db.force_rebuild_chroma_index()["status"] == "rebuilt"
+
+        # The rebuild replaced vectors/; writes through the live client must
+        # still reach the new directory instead of the moved-away inode.
+        db.create_table("later", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        db.insert("later", {"id": "x1", "body": "post rebuild content"})
+        assert db.count("later") == 1
+        assert db.search("later", "body", "rebuild")
+        db.close()
+
+    def test_force_rebuild_refuses_while_another_instance_holds_path(self, tmp_dir):
+        db1 = self._make_db(tmp_dir)
+        db2 = HybridDB(tmp_dir, embedding_fn=_mock_embedding)  # shares the path
+
+        with pytest.raises(RuntimeError, match="other live HybridDB instance"):
+            db1.force_rebuild_chroma_index()
+
+        # Nothing was swapped, so both instances still work.
+        assert db1.count("msgs") == 5
+        assert db2.count("msgs") == 5
+        db1.close()
+        db2.close()
+
+    def test_force_rebuild_can_be_forced_while_another_instance_holds_path(self, tmp_dir):
+        db1 = self._make_db(tmp_dir)
+        HybridDB(tmp_dir, embedding_fn=_mock_embedding)  # shares the path
+
+        result = db1.force_rebuild_chroma_index(force=True)
+        assert result["status"] == "rebuilt"
+        db1.create_table("later", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        db1.insert("later", {"id": "x1", "body": "forced rebuild content"})
+        assert db1.count("later") == 1
+        db1.close()
+
+    def test_restore_leaves_instance_writable_after_directory_swap(self, tmp_dir):
+        db = self._make_db(tmp_dir)
+        with tempfile.TemporaryDirectory() as dest:
+            db.backup(dest)
+            db.restore(dest)
+
+        # restore() also swapped vectors/; the rebuilt client must be usable.
+        db.create_table("after_restore", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
+        db.insert("after_restore", {"id": "a", "body": "post restore content"})
+        assert db.count("after_restore") == 1
+        db.close()
+
+    def test_closed_instance_does_not_block_force_rebuild(self, tmp_dir):
+        db1 = self._make_db(tmp_dir)
+        db2 = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        db2.close()
+
+        # db2 is closed, so db1 is the only live holder and may rebuild.
+        assert db1.force_rebuild_chroma_index()["status"] == "rebuilt"
+        db1.close()

@@ -280,20 +280,22 @@ db.vacuum()                        # reclaim disk space (rebuilds the SQLite fil
 report = db.check_integrity()      # diagnostics across SQLite, ChromaDB, DuckDB
 db.reindex(table=None)             # rebuild Chroma + FTS5 + DuckDB from SQLite data
 db.force_rebuild_chroma_index()    # drop and rebuild the Chroma index
+db.force_rebuild_chroma_index(force=True)  # ...even if other instances share the path
 db.stats()                         # size and count statistics for all storage layers
 db.close()                         # close handles
 ```
 
 > **`force_rebuild_chroma_index()` is process-global, not per-instance.**
 > All `HybridDB` objects in a process share one Chroma client per vector path
-> (`hybriddb.db._chroma_client_pool`). The rebuild replaces the Chroma directory
-> and swaps that pooled client, which can leave other live instances on the same
-> path holding a client whose view of the directory is stale — a subsequent
-> `list_collections()`/`count()` can then raise
-> `chromadb.errors.NotFoundError`. `SharedSystemClient.clear_system_cache()` is
-> never called by the rebuild. Call it from a quiesced process, and prefer
-> `reindex()` where it suffices. Tracked in
-> open-assistants-lab/assistant#49.
+> (`hybriddb.db._chroma_client_pool`). Because the rebuild replaces the Chroma
+> directory, it **raises `RuntimeError` while another live instance holds the
+> same path** — those instances would otherwise be left holding a client bound to
+> the replaced directory and fail on their next read or write. Close them first,
+> or pass `force=True` to rebuild anyway (the other instances stay broken). A
+> closed instance (`db.close()`) does not block the rebuild. The rebuild also
+> drops Chroma's cached per-path `System` before the swap, so the rebuilt client
+> is not bound to the moved-away database. `restore()` applies the same
+> invalidation. Prefer `reindex()` where it suffices.
 
 Export/import as portable SQL (FTS5 is excluded from dumps and rebuilt on
 import):

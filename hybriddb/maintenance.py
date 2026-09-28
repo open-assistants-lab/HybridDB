@@ -61,6 +61,16 @@ class MaintenanceMixin:
                     "header_corrupt" if header_corrupt else "size_exceeded",
                 )
                 if auto_rebuild:
+                    from hybriddb.db import other_chroma_path_holders
+                    others = other_chroma_path_holders(self._vector_path, self)
+                    if others:
+                        # Swapping vectors/ would strand those instances on the
+                        # replaced directory; skip rather than fail construction.
+                        logger.warning(
+                            "chromadb.auto_rebuild_skipped path=%s other_instances=%d",
+                            str(link_file), others,
+                        )
+                        return
                     logger.info("chromadb.auto_rebuilding path=%s", str(link_file))
                     self._rebuild_chroma_index()
                     return
@@ -121,8 +131,14 @@ class MaintenanceMixin:
     def _rebuild_chroma_index(self) -> None:
         if self._chroma is None:
             return
-        from hybriddb.db import _chroma_client_pool, _chroma_pool_lock
+        from hybriddb.db import (
+            _chroma_client_pool,
+            _chroma_pool_lock,
+            _evict_chroma_path_clients,
+            _register_chroma_path_holder,
+        )
         old_path = Path(self._vector_path)
+        key = os.fspath(old_path)
         temp_root = Path(tempfile.mkdtemp(dir=old_path.parent, prefix="chroma_rebuild_"))
         temp_vectors = temp_root / "vectors"
         try:
@@ -157,6 +173,10 @@ class MaintenanceMixin:
                     new_col.add(ids=ids, embeddings=emb, documents=docs, metadatas=metas)
                     offset += _CHROMA_REBUILD_BATCH
 
+            # Drop the pooled client AND Chroma's per-path System *before* the
+            # directory moves: the System's open SQLite handle must not survive
+            # the swap, and the client built below must not re-attach to it.
+            _evict_chroma_path_clients(key)
             backup_path = old_path.with_suffix(
                 old_path.suffix + ".backup_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
             )
@@ -170,17 +190,41 @@ class MaintenanceMixin:
             self._chroma = chromadb.PersistentClient(
                 path=str(old_path), settings=ChromaSettings(anonymized_telemetry=False),
             )
-            key = os.fspath(old_path)
             with _chroma_pool_lock:
                 _chroma_client_pool[key] = self._chroma
+            _register_chroma_path_holder(key, self)
             logger.info("chromadb.index_rebuilt old_backup=%s new_path=%s", str(backup_path), str(old_path))
         except Exception:
             shutil.rmtree(str(temp_root), ignore_errors=True)
             raise
 
-    def force_rebuild_chroma_index(self) -> dict:
+    def force_rebuild_chroma_index(self, force: bool = False) -> dict:
+        """Rebuild the Chroma index into a fresh directory and swap it in.
+
+        The vectors/ directory is replaced, which is a process-global operation:
+        any other live HybridDB instance on this path would keep a Chroma client
+        bound to the moved-away database and fail on its next read or write. This
+        therefore refuses to run while another instance holds the path.
+
+        Args:
+            force: Rebuild even when other live instances hold this path. Those
+                instances are left with clients bound to the replaced directory.
+
+        Raises:
+            RuntimeError: Another live instance holds this path and ``force`` is
+                False.
+        """
         if self._chroma is None:
             return {"status": "unavailable", "error": "ChromaDB not initialized"}
+        from hybriddb.db import other_chroma_path_holders
+        others = other_chroma_path_holders(self._vector_path, self)
+        if others and not force:
+            raise RuntimeError(
+                f"force_rebuild_chroma_index() replaces {self._vector_path!r}, which is "
+                f"held by {others} other live HybridDB instance(s) in this process. "
+                f"Close them first, or pass force=True to rebuild anyway — the other "
+                f"instances will keep clients bound to the replaced directory."
+            )
         self._rebuild_chroma_index()
         total = sum(
             self._chroma.get_collection(c.name if hasattr(c, "name") else str(c)).count()
@@ -339,6 +383,10 @@ class MaintenanceMixin:
                 self._duckdb_conn.close()
             except Exception:
                 pass
+        if self._chroma is not None:
+            # A closed instance must not block a later directory swap.
+            from hybriddb.db import _release_chroma_path_holder
+            _release_chroma_path_holder(self._vector_path, self)
 
     # ── Import/Export & SQL Utilities ──────────────────────────────────────
 
@@ -398,9 +446,10 @@ class MaintenanceMixin:
             shutil.move(str(self.path), str(old))
             shutil.copytree(str(src), str(self.path), dirs_exist_ok=True)
 
-            from hybriddb.db import _chroma_client_pool, _chroma_pool_lock
-            with _chroma_pool_lock:
-                _chroma_client_pool.pop(str(self._vector_path), None)
+            from hybriddb.db import _evict_chroma_path_clients
+            # Drop Chroma's cached System for this path too: it holds an open
+            # SQLite handle to the directory restore() is about to replace.
+            _evict_chroma_path_clients(str(self._vector_path))
             self._chroma = None
             self._init_chroma(force=True)
 

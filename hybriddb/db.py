@@ -11,6 +11,7 @@ import logging
 import os
 import sqlite3
 import threading
+import weakref
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -50,6 +51,71 @@ _CHROMA_REBUILD_BATCH = 5000
 
 _chroma_client_pool: dict[str, Any] = {}
 _chroma_pool_lock = threading.Lock()
+
+# Live HybridDB instances holding each vector path's Chroma client. Replacing
+# the vectors/ directory (force_rebuild_chroma_index / restore) is a
+# process-global operation, so those paths must know whether another instance
+# would be left holding a client bound to the replaced directory.
+_chroma_path_holders: dict[str, "weakref.WeakSet[Any]"] = {}
+
+
+def _register_chroma_path_holder(vector_path: str, db: Any) -> None:
+    """Record `db` as a live holder of `vector_path`'s Chroma client."""
+    with _chroma_pool_lock:
+        holders = _chroma_path_holders.get(vector_path)
+        if holders is None:
+            holders = weakref.WeakSet()
+            _chroma_path_holders[vector_path] = holders
+        holders.add(db)
+
+
+def _release_chroma_path_holder(vector_path: str, db: Any) -> None:
+    """Forget `db` as a holder (called on close(); GC drops it via weakrefs)."""
+    with _chroma_pool_lock:
+        holders = _chroma_path_holders.get(vector_path)
+        if holders is None:
+            return
+        holders.discard(db)
+        if not holders:
+            _chroma_path_holders.pop(vector_path, None)
+
+
+def other_chroma_path_holders(vector_path: str, db: Any) -> int:
+    """Count live HybridDB instances other than `db` holding this vector path."""
+    with _chroma_pool_lock:
+        holders = _chroma_path_holders.get(vector_path)
+        if not holders:
+            return 0
+        return sum(1 for holder in holders if holder is not db)
+
+
+def _evict_chroma_path_clients(vector_path: str) -> None:
+    """Drop every cached Chroma client and System for `vector_path`.
+
+    ChromaDB keeps a class-level ``_identifier_to_system`` dict keyed by
+    persist_directory; each System holds an open SQLite handle to chroma.sqlite.
+    Swapping the directory out from under a live System leaves that handle bound
+    to the moved-away inode, so every later read/write through the shared client
+    fails with SQLITE_READONLY_DBMOVED (1032) or a NotFoundError naming a stale
+    collection ID.
+
+    Must run BEFORE a new client is constructed for the path, otherwise the new
+    client re-attaches to the stale System. Deliberately scoped to one path:
+    ``SharedSystemClient.clear_system_cache()`` wipes every path, which would
+    break clients for unrelated databases in the same process.
+    """
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    with _chroma_pool_lock:
+        _chroma_client_pool.pop(vector_path, None)
+        system = SharedSystemClient._identifier_to_system.pop(vector_path, None)
+        SharedSystemClient._identifier_to_refcount.pop(vector_path, None)
+    if system is not None:
+        try:
+            system.stop()
+        except Exception:  # noqa: BLE001 - best effort; cache entry already dropped
+            logger.debug("chroma_system_stop_failed path=%s", vector_path, exc_info=True)
+
 
 _SKIP_SEARCH_COLUMNS: set[str] = {
     "rowid", "id", "memory_id", "fact_key", "scope", "project_id",
@@ -219,6 +285,8 @@ class HybridDB(
             with _chroma_pool_lock:
                 _chroma_client_pool[key] = client
             self._chroma = client
+
+        _register_chroma_path_holder(key, self)
 
         with self._connect() as cur:
             cur.execute("SELECT table_name, embedding_model, embedding_dim FROM _schema")

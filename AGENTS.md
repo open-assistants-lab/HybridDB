@@ -107,7 +107,17 @@ custom dims stay consistent. Metadata scalar columns are mirrored for
 `where=` pre-filtering; operator forms (`$gte`…) are enforced by Chroma for
 semantic/hybrid but must ALSO be evaluated in `_matches_where` for keyword
 mode (no Chroma query happens there). Chroma metadata merges on
-update/upsert — removing keys requires delete+re-add.
+update/upsert — removing keys requires delete+re-add. ChromaDB caches one
+`System` per `persist_directory` (class-level `_identifier_to_system`) holding
+an open SQLite handle to `chroma.sqlite`, and HybridDB shares one client per
+vector path across every instance in the process. So replacing the vectors/
+directory (`force_rebuild_chroma_index`, `restore`) invalidates every holder:
+call `_evict_chroma_path_clients(path)` BEFORE the swap, never after (the
+post-swap client is built first and would re-attach to the stale System).
+Never call `SharedSystemClient.clear_system_cache()` — it wipes every path and
+breaks unrelated databases; the per-path eviction is the correct scope.
+Directory swaps are process-global: `force_rebuild_chroma_index()` refuses
+while another live instance holds the path (`force=True` overrides).
 
 **Long documents** are chunked above the engine (`hybriddb.chunking` +
 chunks-as-rows with a parent link) — one embedding per LONGTEXT cell is the
