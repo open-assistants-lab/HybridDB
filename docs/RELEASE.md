@@ -16,9 +16,49 @@ Expected current results:
 
 ```text
 ruff: All checks passed
-pytest: 277 passed, 48 skipped
+pytest: 280 passed, 48 skipped
 benchmark smoke: 48 passed
 ```
+
+## Interpreter / SQLite Gate (required)
+
+SQLite is **not** a pip dependency — it ships inside the interpreter. So the
+SQLite version a user gets is whatever their Python bundles, and a newer Python
+means a newer SQLite we never tested. This is the same exposure that let 0.8.1
+and 0.8.2 ship broken against the chromadb floor (issue #1), except we do not
+control it at all.
+
+Current state: development runs Python 3.13 / SQLite 3.50.4, while Python 3.14
+bundles **SQLite 3.53.4**. Anyone on 3.14 was therefore ahead of our test
+matrix.
+
+Run the gate before every release:
+
+```bash
+uv run python scripts/check_interpreter_matrix.py            # 3.13 + 3.14
+uv run python scripts/check_interpreter_matrix.py --quick    # skip perf gates
+uv run python scripts/check_interpreter_matrix.py -- -k TestSQLiteCapabilities
+```
+
+It runs the suite in isolated environments, prints the resolved Python /
+SQLite / chromadb versions so a failure can be attributed, and exits non-zero if
+any interpreter fails. The *chromadb floor* check above covers the bottom of the
+supported chromadb range; this covers the newest interpreter/SQLite end.
+
+Two consequences worth remembering:
+
+- **FTS5 is a compile-time SQLite option**, not a given. `hybriddb` probes for
+  it and raises `FTS5UnavailableError` with an actionable message rather than
+  leaking `no such module: fts5` from the DDL. Do not add a code path that
+  creates an FTS5 virtual table without going through `_create_fts5()`.
+- The perf gates in `tests/test_versioning.py` compare two wall-clock
+  measurements, so a single sample sits on the noise floor. The update-heavy
+  gate's ingest allowance is **3x**, not 2x: at 2x it missed by 4% on 3.14 in
+  the full suite while passing in isolation, and the gate exists to catch a
+  ~17x regression, which 3x still catches by a wide margin. **Do not** make the
+  gates more stable by repeating the churn/rollback cycle to take a median — each
+  round triples the Chroma write volume, which provokes a hard segfault in
+  chromadb's native Rust bindings. Widen the allowance instead.
 
 ## Declared-Floor Check (required)
 
@@ -33,7 +73,7 @@ unguarded access there broke `force_rebuild_chroma_index()` and `restore()`
 for CV in 1.5.0 1.5.1; do
   uv run --no-project --isolated --no-cache --refresh \
     --with "chromadb==$CV" \
-    --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.8.4-py3-none-any.whl \
+    --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.9.0-py3-none-any.whl \
     python -c "
 import chromadb, tempfile
 from chromadb.api.shared_system_client import SharedSystemClient
@@ -71,11 +111,11 @@ rm -rf dist
 uv build
 ```
 
-Expected files for version `0.8.4`:
+Expected files for version `0.9.0`:
 
 ```text
-dist/hybriddb-0.8.4.tar.gz
-dist/hybriddb-0.8.4-py3-none-any.whl
+dist/hybriddb-0.9.0.tar.gz
+dist/hybriddb-0.9.0-py3-none-any.whl
 ```
 
 ## Wheel Smoke Test
@@ -84,7 +124,7 @@ Run an isolated install test from outside the repo:
 
 ```bash
 uv run --no-project --isolated --no-cache \
-  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.8.4-py3-none-any.whl \
+  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.9.0-py3-none-any.whl \
   --with duckdb \
   python - <<'PY'
 import asyncio
@@ -141,7 +181,7 @@ Or configure trusted publishing in PyPI and run the same command from the truste
 After PyPI release:
 
 ```bash
-uv run --no-project --isolated --no-cache --with hybriddb==0.8.4 python - <<'PY'
+uv run --no-project --isolated --no-cache --with hybriddb==0.9.0 python - <<'PY'
 from tempfile import TemporaryDirectory
 from hybriddb import HybridDB, LONGTEXT
 

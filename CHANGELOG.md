@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.9.0] — 2026-09-28
+
+### Added
+
+- **`FTS5UnavailableError` and an FTS5 capability probe.** FTS5 is a
+  compile-time SQLite option, not a given: some Python builds ship a SQLite
+  without it. HybridDB's keyword and hybrid search are built on FTS5, and a
+  missing module previously surfaced as a raw `no such module: fts5` from the
+  `CREATE VIRTUAL TABLE` statement. HybridDB now probes once (cached) and
+  raises `FTS5UnavailableError` with the SQLite version and how to fix it. The
+  probe lives in `_create_fts5()`, the single site that emits FTS5 DDL, so
+  `create_table`, `reindex`, `import_sql` and schema changes are all covered.
+  `hybriddb.utils.sqlite_has_fts5()` is exposed for diagnostics.
+- **`scripts/check_interpreter_matrix.py`** — runs the suite across
+  interpreters and prints the resolved Python / SQLite / chromadb versions, so a
+  failure can be attributed. SQLite ships inside the interpreter rather than as
+  a dependency, so users on a newer Python run a combination that is otherwise
+  never tested: Python 3.14 bundles SQLite 3.53.4 while development runs
+  3.13 / 3.50.4. Now a required release gate alongside the chromadb floor
+  check.
+
+### Fixed
+
+- The update-heavy rollback perf gate's ingest allowance is now 3x (was 2x). At
+  2x it missed by 4% on Python 3.14 / SQLite 3.53.4 in the full suite while
+  passing in isolation; the gate exists to catch a ~17x per-row regression,
+  which 3x still catches by a wide margin. Deliberately *not* fixed by
+  repeating the churn/rollback cycle for a median: each round triples the
+  Chroma write volume and reliably provokes a hard segfault in chromadb 1.5.9's
+  native Rust bindings (#5).
+- `tests/benchmarks/conftest.py` no longer crashes at session finish with
+  `ValueError: no option named '--benchmark-json'` when the optional
+  `pytest-benchmark` extra is absent — the benchmark suite is collected by the
+  default `testpaths`, so the hook ran regardless.
+
 ## [0.8.4] — 2026-09-28
 
 ### Fixed

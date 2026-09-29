@@ -12,6 +12,7 @@ from hybriddb.utils import (
     _column_spec,
     _now_iso,
     _validate_identifier,
+    require_fts5,
 )
 from hybriddb.versioning import (
     GENESIS_HASH,
@@ -119,6 +120,7 @@ class SchemaMixin:
     def _create_fts5(
         self, cur: sqlite3.Cursor, table: str, col: str, rowid_col: str | None = None
     ) -> None:
+        require_fts5()
         fts_name = f"{table}_fts_{col}"
         if rowid_col is None:
             rowid_col = self._get_rowid_ref(table, cur=cur)

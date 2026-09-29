@@ -69,7 +69,13 @@ def db(request, embedding_fn, tmp_path) -> HybridDB:
 
 
 def pytest_sessionfinish(session, exitstatus):
-    json_path = session.config.getoption("--benchmark-json")
+    # pytest-benchmark is an optional extra, but the benchmark suite is picked
+    # up by the default `testpaths`, so this hook runs even when it is absent
+    # and the option is simply not registered.
+    try:
+        json_path = session.config.getoption("--benchmark-json")
+    except ValueError:
+        return
     if json_path:
         path = getattr(json_path, "name", json_path)
         if path and Path(path).exists():

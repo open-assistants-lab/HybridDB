@@ -35,3 +35,7 @@ class Column:
 
 class EmbeddingModelError(Exception):
     pass
+
+
+class FTS5UnavailableError(Exception):
+    """SQLite was built without the FTS5 module, which keyword search needs."""

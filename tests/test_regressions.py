@@ -918,3 +918,52 @@ class TestChromaStaleClientAndClose:
         db.create_table("later", {"id": "TEXT PRIMARY KEY", "body": LONGTEXT})
         db.insert("later", {"id": "a", "body": "usable after close"})
         assert db.count("later") == 1
+
+
+class TestSQLiteCapabilities:
+    """FTS5 is a compile-time SQLite option, so it is absent from some Python
+    builds. HybridDB's keyword search depends on it and must say so clearly
+    rather than leaking "no such module: fts5" from the DDL."""
+
+    def test_probe_detects_fts5_on_this_build(self):
+        from hybriddb.utils import sqlite_has_fts5
+
+        assert sqlite_has_fts5() is True, (
+            "this interpreter's SQLite lacks FTS5 — the rest of this file "
+            "cannot be trusted"
+        )
+
+    def test_create_table_reports_missing_fts5_clearly(self, tmp_dir, monkeypatch):
+        import hybriddb.schema as schema
+
+        monkeypatch.setattr(schema, "require_fts5", _make_no_fts5())
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        with pytest.raises(hybriddb.FTS5UnavailableError, match="FTS5"):
+            db.create_table("docs", {"body": LONGTEXT})
+        db.close()
+
+    def test_existing_store_search_reports_missing_fts5(self, tmp_dir, monkeypatch):
+        import hybriddb.schema as schema
+
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        db.create_table("docs", {"body": LONGTEXT})
+        db.insert("docs", {"body": "hello world"})
+        assert db.search("docs", "body", "hello")
+
+        monkeypatch.setattr(schema, "require_fts5", _make_no_fts5())
+        with pytest.raises(hybriddb.FTS5UnavailableError, match="SQLITE_ENABLE_FTS5"):
+            db.reindex("docs")
+        db.close()
+
+
+def _make_no_fts5():
+    def _raise():
+        from hybriddb.types import FTS5UnavailableError
+
+        raise FTS5UnavailableError(
+            "This Python's SQLite was built without FTS5 "
+            "(sqlite3.sqlite_version=3.0.0), which HybridDB requires for "
+            "keyword and hybrid search. ... SQLITE_ENABLE_FTS5 ..."
+        )
+
+    return _raise
