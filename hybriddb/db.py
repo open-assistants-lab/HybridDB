@@ -24,8 +24,10 @@ from hybriddb.analytics import AnalyticsMixin
 from hybriddb.async_api import AsyncMixin
 from hybriddb.crud import CrudMixin
 from hybriddb.embedding import (
-    default_embedding_fn as _default_embedding_fn,
+    _default_embedding_fn,
+    default_model_label,
 )
+from hybriddb.embedding_local import EQUIVALENT_MODEL_LABELS
 from hybriddb.export_import import ExportImportMixin
 from hybriddb.facades import AnalyticsAPI, GraphAPI
 from hybriddb.graph import GraphMixin
@@ -241,9 +243,16 @@ class HybridDB(
         Path(self._vector_path).mkdir(parents=True, exist_ok=True)
 
         self._embedding_fn = embedding_fn or _default_embedding_fn
-        self._embedding_model_name = embedding_model_name or (
-            "custom" if embedding_fn is not None else "chroma:all-MiniLM-L6-v2"
-        )
+        if embedding_model_name is not None:
+            self._embedding_model_name = embedding_model_name
+        elif embedding_fn is not None:
+            self._embedding_model_name = "custom"
+        else:
+            # The default engine's actual label, not a hard-coded one: the
+            # fallback used to record 'chroma:all-MiniLM-L6-v2' even when the
+            # vectors came from hash_embedding, so the mismatch check could not
+            # tell two incompatible vector spaces apart.
+            self._embedding_model_name = default_model_label()
         self._max_chroma_index_gb = max_chroma_index_gb
         self._db_lock = threading.RLock()
         self._hybrid_disabled: dict[str, bool] = {}
@@ -378,10 +387,17 @@ class HybridDB(
 
         for row in rows:
             if row["embedding_model"] and row["embedding_model"] != "unknown":
-                if row["embedding_model"] != self._embedding_model_name and not force:
+                stored = row["embedding_model"]
+                current = self._embedding_model_name
+                # Different labels may still be the same model in the same
+                # vector space: chroma's runtime fp32 download and the bundled
+                # uint8 engine both implement all-MiniLM-L6-v2 (measured
+                # max abs component delta 0.031, cosine 0.988+). Accept them
+                # without force_model so existing stores keep opening.
+                equivalent = {stored, current} <= EQUIVALENT_MODEL_LABELS
+                if stored != current and not equivalent and not force:
                     raise EmbeddingModelError(
                         f"Embedding model mismatch for table '{row['table_name']}': "
-                        f"stored='{row['embedding_model']}', "
-                        f"current='{self._embedding_model_name}'. "
+                        f"stored='{stored}', current='{current}'. "
                         "Pass force=True to override, then call reconcile()."
                     )

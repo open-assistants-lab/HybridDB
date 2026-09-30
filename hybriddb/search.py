@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
@@ -227,14 +228,15 @@ class SearchMixin:
             if not results["ids"] or not results["ids"][0]:
                 return []
             raw_ids = list(results["ids"][0])
-            if self._collection_scheme(collection) == "rowid":
-                # legacy collection: normalize rowid keys to pks so all
-                # search paths share one identity
-                legacy_ids = [str(i) for i in raw_ids if str(i).isdigit()]
-                rowid_to_pk: dict[str, Any] = {}
-                if legacy_ids:
-                    with self._connect() as cur:
-                        pk_col = self._get_pk_column(table, cur=cur)
+            with self._connect() as cur:
+                pk_col = self._get_pk_column(table, cur=cur)
+                pk_declared = self._pk_storage_class(table, cur=cur)
+                if self._collection_scheme(collection) == "rowid":
+                    # legacy collection: normalize rowid keys to pks so all
+                    # search paths share one identity
+                    legacy_ids = [str(i) for i in raw_ids if str(i).isdigit()]
+                    rowid_to_pk: dict[str, Any] = {}
+                    if legacy_ids:
                         ph = ",".join("?" * len(legacy_ids))
                         rowid_to_pk = {
                             str(r["_rid"]): r["_pk"]
@@ -243,18 +245,59 @@ class SearchMixin:
                                 legacy_ids,
                             ).fetchall()
                         }
-                raw_ids = [rowid_to_pk.get(str(i), i) for i in raw_ids]
+                    raw_ids = [rowid_to_pk.get(str(i), i) for i in raw_ids]
+            # chroma ids are str(pk). They must be coerced back to the pk
+            # column's *storage class* before the IN lookup: SQLite does not
+            # match TEXT '4983' to INTEGER 4983, so blindly coercing to int
+            # silently dropped every row on tables whose TEXT primary key only
+            # looks numeric (found by the BEIR evaluation: SciFact semantic
+            # scored 0.0 with a fully populated index).
             out = []
             for i, doc_id in enumerate(raw_ids):
                 distance = results["distances"][0][i] if "distances" in results else 0
                 similarity = max(0.0, 1.0 - distance)
-                try:
-                    out.append((int(doc_id), similarity))
-                except ValueError:
-                    out.append((doc_id, similarity))
+                out.append((self._coerce_pk_value(doc_id, pk_declared), similarity))
             return out
         except Exception:
             return []
+
+    def _pk_storage_class(self, table: str, cur: sqlite3.Cursor | None = None) -> str:
+        """Return the primary key column's declared type (upper-cased).
+
+        PRAGMA table_info is used rather than ``_schema`` because it is
+        authoritative for the implicit ``INTEGER PRIMARY KEY`` rowid alias,
+        which ``_schema`` does not carry. Returned type string may be empty
+        when the schema has no declared pk (unusual).
+        """
+        if cur is None:
+            with self._connect() as owned:
+                rows = owned.execute(f"PRAGMA table_info({table})").fetchall()
+        else:
+            rows = cur.execute(f"PRAGMA table_info({table})").fetchall()
+        for row in rows:
+            if row["pk"]:
+                return (row["type"] or "").upper()
+        return ""
+
+    @staticmethod
+    def _coerce_pk_value(value: Any, declared: str) -> Any:
+        """Coerce a chroma id back to the pk column's SQLite storage class.
+
+        TEXT pks keep their string form (even when it looks numeric — that is
+        exactly the case SQLite will not match against an int); INTEGER pks go
+        back to ints. Unparseable values are returned unchanged so a bad label
+        degrades to a dropped row instead of a crash.
+        """
+        text = str(value)
+        decl = (declared or "").upper()
+        try:
+            if decl.startswith("INTEGER"):
+                return int(text)
+            if decl.startswith(("REAL", "FLOAT", "DOUBLE", "NUMERIC")):
+                return float(text)
+        except ValueError:
+            return value
+        return value
 
     @staticmethod
     def _fuse_hybrid(

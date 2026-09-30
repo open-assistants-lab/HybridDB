@@ -16,7 +16,7 @@ Expected current results:
 
 ```text
 ruff: All checks passed
-pytest: 280 passed, 48 skipped
+pytest: 292 passed, 48 skipped
 benchmark smoke: 48 passed
 ```
 
@@ -60,6 +60,21 @@ Two consequences worth remembering:
   round triples the Chroma write volume, which provokes a hard segfault in
   chromadb's native Rust bindings. Widen the allowance instead.
 
+## Engine Accuracy Gate (required when the default embedding engine changes)
+
+The default engine is the bundled uint8 MiniLM. If that engine, its
+quantization, or its tokenizer changes, the BEIR delta must be re-measured and
+`docs/PERFORMANCE.md` updated before release — a silent quality regression is
+exactly what the hash fallback shipped once.
+
+```bash
+uv run python -u scripts/beir_bundle_eval.py      # bundled uint8 vs fp32, BEIR
+```
+
+Acceptance: bundled-uint8 nDCG/Recall deltas stay within ±0.02 of fp32 on both
+datasets (measured 0.10.0: −0.0038 worst case, SciFact hybrid +0.0031). A larger
+delta means the engine must not ship as default.
+
 ## Declared-Floor Check (required)
 
 Private chromadb internals are reached by the client-invalidation path, so the
@@ -73,7 +88,7 @@ unguarded access there broke `force_rebuild_chroma_index()` and `restore()`
 for CV in 1.5.0 1.5.1; do
   uv run --no-project --isolated --no-cache --refresh \
     --with "chromadb==$CV" \
-    --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.9.0-py3-none-any.whl \
+    --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.10.0-py3-none-any.whl \
     python -c "
 import chromadb, tempfile
 from chromadb.api.shared_system_client import SharedSystemClient
@@ -111,11 +126,11 @@ rm -rf dist
 uv build
 ```
 
-Expected files for version `0.9.0`:
+Expected files for version `0.10.0`:
 
 ```text
-dist/hybriddb-0.9.0.tar.gz
-dist/hybriddb-0.9.0-py3-none-any.whl
+dist/hybriddb-0.10.0.tar.gz
+dist/hybriddb-0.10.0-py3-none-any.whl
 ```
 
 ## Wheel Smoke Test
@@ -124,7 +139,7 @@ Run an isolated install test from outside the repo:
 
 ```bash
 uv run --no-project --isolated --no-cache \
-  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.9.0-py3-none-any.whl \
+  --with /Users/eddy/Developer/Python/HybridDB/dist/hybriddb-0.10.0-py3-none-any.whl \
   --with duckdb \
   python - <<'PY'
 import asyncio
@@ -181,7 +196,7 @@ Or configure trusted publishing in PyPI and run the same command from the truste
 After PyPI release:
 
 ```bash
-uv run --no-project --isolated --no-cache --with hybriddb==0.9.0 python - <<'PY'
+uv run --no-project --isolated --no-cache --with hybriddb==0.10.0 python - <<'PY'
 from tempfile import TemporaryDirectory
 from hybriddb import HybridDB, LONGTEXT
 

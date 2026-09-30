@@ -95,6 +95,24 @@ nothing stops a user from running that way.
 4. **Switch `chroma_api_impl`** to the non-Rust segment implementation —
    untested; if it is unaffected, that is a real workaround worth measuring.
 
+## Remediation status
+
+The default path no longer produces word-hash vectors: as of the bundled-engine
+release, `default_embedding_fn` is the bundled uint8 MiniLM (dense, 0/8 clean
+at 30k upserts + 30k deletes), and `hash_embedding` is off the default path —
+it remains exported so the BEIR accuracy harness can still measure the cliff it
+represents. Consequently the HybridDB exposure from *our* fallback is gone; the
+remaining one is a caller passing a sparse `embedding_fn` of their own at
+volume, which the bundled note below covers.
+
+Measured on the real HybridDB journal path (fallback forced, MiniLM
+unavailable) before the fix, for the record:
+
+- ~30k upserts **+ 30k deletes** (checkpoint/rollback) → **4/4 SIGSEGV**
+- ~30k upserts, no deletes → 5/5 clean
+- ~6k upserts + deletes → 5/5 clean
+- shipped default (MiniLM), dense, 30k + 30k → 5/5 clean
+
 ## Do not attempt
 
 Repeating the churn/rollback cycle to take a median of wall-clock timings in

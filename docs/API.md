@@ -51,15 +51,20 @@ db = HybridDB(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `path` | `str` | — | Directory for the SQLite file (`app.db`) and the vector store (`vectors/`). Created if missing. |
-| `embedding_fn` | `callable \| None` | `None` | Custom embedding function. Defaults to ChromaDB's bundled local MiniLM. |
-| `embedding_model_name` | `str \| None` | `None` | Label recorded for the embedding. Defaults to `chroma:all-MiniLM-L6-v2`, or `"custom"` when `embedding_fn` is provided. |
+| `embedding_fn` | `callable \| None` | `None` | Custom embedding function. Defaults to the bundled uint8 MiniLM engine (`hybriddb:all-MiniLM-L6-v2-uint8`, 22.9 MB, no network). |
+| `embedding_model_name` | `str \| None` | `None` | Label recorded for the embedding. Defaults to the resolved engine's label — `hybriddb:all-MiniLM-L6-v2-uint8` for the bundled model, or `chroma:all-MiniLM-L6-v2` if that engine cannot load and Chroma's fp32 model is fetched instead — and `"custom"` when `embedding_fn` is provided. Stores recording either MiniLM label open without `force_model`, since both are the same model in the same vector space (measured cosine 0.988, max component delta 0.031). |
 | `force_model` | `bool` | `False` | Skip the embedding-model mismatch check on init — use when you deliberately swapped `embedding_fn` for an existing store. |
 | `max_chroma_index_gb` | `int` | `5` | Guardrail for local disk usage by the vector index. |
 | `auto_rebuild_chroma` | `bool` | `False` | Rebuild the Chroma index on startup when a corruption check trips. |
 
-A hash embedding is used only as a fallback if ChromaDB's default embedding
-cannot load — it exists for offline smoke tests, not production (measured at a
-5.3× accuracy cliff on BEIR; see `docs/PERFORMANCE.md`).
+The default path no longer falls back to a hash embedding. It uses the bundled
+uint8 MiniLM (no network), then Chroma's runtime fp32 download as a fallback
+engine, and raises `EmbeddingModelError` when neither is usable. The previous
+silent hash fallback is gone: it measured a 5.3× accuracy cliff on BEIR
+(nDCG 0.059 vs 0.343 — see `docs/PERFORMANCE.md`) and its word-hash vectors are
+the construct that provokes a SIGSEGV in chromadb 1.5.9's native bindings
+(issue #5). `hybriddb.embedding.hash_embedding` remains importable for the
+accuracy harness only.
 
 Custom embedding:
 

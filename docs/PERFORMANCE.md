@@ -11,7 +11,9 @@ study.
 Evaluated on two BEIR datasets with real queries and relevance judgments:
 **NFCorpus** (3,633 medical docs, 324 queries, graded 0-3) and **SciFact**
 (5,183 scientific abstracts, 301 queries, binary). Metrics are averaged over
-all queries. Embeddings: ChromaDB's bundled MiniLM.
+all queries. Embeddings: `SentenceTransformer("all-MiniLM-L6-v2")` (per-row,
+the harness fixture); the bundled-uint8 comparison below is measured through the
+identical HybridDB pipeline.
 
 | Dataset | Mode | nDCG@10 | Recall@10 | P@10 | MRR |
 |---|---|---|---|---|---|
@@ -45,7 +47,27 @@ all queries. Embeddings: ChromaDB's bundled MiniLM.
    < 0.03) — no tuning needed.
 3. **The hash embedding fallback is a 5.3× accuracy cliff** (nDCG 0.059 vs
    0.315, near-random). Semantic search without a real embedding model is not
-   viable; the fallback exists for offline smoke tests, not production.
+   viable; as of 0.10 the fallback is off the default path entirely — the
+   bundled uint8 MiniLM removes the need for it (see the accuracy table below),
+   and it was also the vector construct behind the chromadb segfault in
+   `docs/notes/2026-09-28-chromadb-rust-bindings-segfault.md`.
+
+### Bundled engine vs fp32 (2026-09-30, BEIR, same harness)
+
+The default engine ships a per-channel uint8 MiniLM inside the package instead
+of downloading fp32 on first use. Delta against fp32 through the identical
+HybridDB pipeline — and against the published sentence-transformers baseline:
+
+| Dataset | Mode | fp32 ONNX | bundled uint8 | Δ | sentence-transformers |
+|---|---|---|---|---|---|
+| NFCorpus | semantic | 0.3149 | 0.3111 | −0.0038 | 0.3156 |
+| NFCorpus | hybrid | 0.3429 | 0.3405 | −0.0024 | 0.3430 |
+| SciFact | semantic | 0.6451 | 0.6445 | −0.0006 | 0.6451 |
+| SciFact | hybrid | 0.7022 | 0.7053 | **+0.0031** | 0.7018 |
+
+Max component delta is 0.031 (cosine 0.988+). The bundled engine is therefore
+the same model in the same vector space, not an accuracy tier, and stores
+recorded with either MiniLM label open without `force_model`.
 
 ## 2. Analytics: DuckDB Mirror vs Raw SQLite
 

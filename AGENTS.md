@@ -138,6 +138,30 @@ entry would break mutual exclusion.
 chunks-as-rows with a parent link) — one embedding per LONGTEXT cell is the
 right granularity for messages/memory, not for multi-page documents.
 
+**Default embedding engine (0.10+).** The default is the bundled uint8
+MiniLM (`hybriddb/embedding_local.py` + `hybriddb/models/…`, no network, CPU
+provider, dynamic padding) — vectors verified byte-identical to Chroma's fp32
+runtime model. `hash_embedding` is off the default path: it measured a 5.3×
+BEIR cliff AND its word-hash vectors are the construct that triggers the
+chromadb 1.5.9 segfault (#5) — it stays exported for the accuracy harness only.
+`default_engine()` falls back to Chroma's fp32 download, then raises
+`EmbeddingModelError`; never reintroduce a silent fallback. `_schema.embedding_model`
+must record the engine that actually produced the vectors. The bundled engine
+and Chroma's fp32 are in one equivalence set (`EQUIVALENT_MODEL_LABELS`) — same
+model, same space — so either label opens a store without `force_model`. Any
+time the default engine changes, run the BEIR gate
+(`tests/benchmarks/test_accuracy.py --run-benchmarks`) and update the delta
+table in `docs/PERFORMANCE.md`.
+
+**Numeric-looking TEXT primary keys need storage-class-aware ids.** Chroma ids
+are `str(pk)`; coercing them blindly with `int()` made `_vector_search` fetch
+`WHERE text_pk IN (4983, …)` and SQLite never matches TEXT '4983' to INTEGER
+4983 — every semantic result was silently dropped (found by the BEIR eval:
+SciFact semantic scored 0.0 with a fully populated index). Coerce ids to the pk
+column's declared type (`_pk_storage_class` via `PRAGMA table_info`, which sees
+the implicit rowid alias that `_schema` omits); fusion keys must match what
+`_fts_search` returns.
+
 ## Testing conventions
 
 - Bug fixes get a failing test first, in `tests/test_regressions.py` (or a

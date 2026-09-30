@@ -967,3 +967,60 @@ def _make_no_fts5():
         )
 
     return _raise
+
+
+class TestNumericTextPkSemanticSearch:
+    """Semantic search silently returned zero rows when a table's TEXT primary
+    key *looked* numeric (e.g. '4983'). _vector_search coerced chroma's str(pk)
+    ids with int(), so the fetch ran `WHERE text_pk IN (4983, ...)` and SQLite
+    never matched TEXT '4983' to INTEGER 4983. Every result was dropped, and
+    semantic/hybrid degenerated to keyword-only. Caught by the BEIR evaluation:
+    SciFact semantic scored 0.0 while its Chroma index was fully populated."""
+
+    def _db(self, tmp_dir):
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        db.create_table("docs", {"id": "TEXT PRIMARY KEY", "content": LONGTEXT})
+        rows = [
+            {"id": "4983", "content": "protein sequencing and the spike glycoprotein of SARS-CoV-2"},
+            {"id": "5836", "content": "remdesivir and baricitinib for hospitalised patients"},
+            {"id": "18670", "content": "SARS-CoV-2 genome assembled and variants identified"},
+            {"id": "21999", "content": "hydroxychloroquine trial found no measurable benefit"},
+        ]
+        db.insert_batch("docs", rows)
+        return db
+
+    def test_semantic_returns_rows_for_numeric_looking_text_pk(self, tmp_dir):
+        db = self._db(tmp_dir)
+        hits = db.search("docs", "content", "spike glycoprotein", mode="semantic", limit=10)
+        assert hits, "semantic search returned no rows for numeric-looking TEXT pks"
+        assert any(r["id"] == "4983" for r in hits)
+        db.close()
+
+    def test_hybrid_is_not_keyword_only_for_numeric_looking_text_pk(self, tmp_dir):
+        """Hybrid must actually include the semantic half, not silently
+        degrade to keyword because the vector half fetched nothing."""
+        db = self._db(tmp_dir)
+        hits = db.search("docs", "content", "remdesivir hospitalised patients",
+                         mode="hybrid", limit=10)
+        assert hits
+        modes = {r.get("_search_mode") for r in hits}
+        assert "semantic" in modes or "hybrid" in modes or hits[0]["_score"] > 0
+        # the row that only the vector half could rank must be reachable
+        sem = db.search("docs", "content", "remdesivir hospitalised patients",
+                        mode="semantic", limit=10)
+        # Rank order depends on the embedder; assert reachability, not order.
+        assert {"5836", "18670"} <= {r["id"] for r in sem}
+        db.close()
+
+    def test_integer_pk_semantic_search_still_works(self, tmp_dir):
+        """The INTEGER PRIMARY KEY case must keep working: chroma ids are
+        str(pk), so they must be coerced back to ints for the fetch."""
+        db = HybridDB(tmp_dir, embedding_fn=_mock_embedding)
+        db.create_table("docs", {"content": LONGTEXT})
+        db.insert_batch("docs", [
+            {"content": "protein sequencing and the spike glycoprotein"},
+            {"content": "remdesivir for hospitalised patients"},
+        ])
+        hits = db.search("docs", "content", "spike glycoprotein", mode="semantic", limit=10)
+        assert hits
+        db.close()

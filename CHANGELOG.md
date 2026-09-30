@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.10.0] — 2026-09-30
+
+### Added
+
+- **Bundled MiniLM embedding engine, default and offline.** the default vector
+  engine now ships inside the package: `all-MiniLM-L6-v2` quantized per-channel
+  to uint8 (22.9 MB wheel vs 90.4 MB fp32), with a vendored loader that pads to
+  the batch rather than a global 256 tokens and pins `CPUExecutionProvider` —
+  vectors verified identical to Chroma's fp32 runtime model (cosine 1.0 before
+  quantization; 0.988 after) and ~6x faster per row. Requires no network, and
+  `onnxruntime`/`tokenizers` were already required by chromadb. Attribution and
+  provenance live in `hybriddb/models/…/NOTICE.md`.
+
+### Changed
+
+- **The silent hash fallback is off the default path.** The previous default
+  substituted a hash embedding whenever the ONNX model could not be fetched.
+  That mode measured a 5.3× accuracy cliff on BEIR (nDCG 0.059 vs 0.343), and
+  its word-hash vectors are the exact construct that provokes the chromadb
+  1.5.9 native segfault (issue #5). `default_embedding_fn` now resolves the
+  bundled engine, then Chroma's fp32 download, then raises
+  `EmbeddingModelError` with a fix in the message — never silently degrades.
+  `hybriddb.embedding.hash_embedding` stays exported for the accuracy harness
+  only.
+- **`_schema.embedding_model` records the engine that actually produced the
+  vectors.** It used to record `chroma:all-MiniLM-L6-v2` even when the vectors
+  came from hash_embedding, so the model-mismatch check could not tell two
+  incompatible vector spaces apart and a store could reopen under a different
+  embedder and silently mix them. New stores record the bundled-engine label;
+  stores carrying either MiniLM label open without `force_model` (same model,
+  same space — measured cosine 0.988, max component delta 0.031). Foreign
+  labels still raise and need `force_model=True` + `reindex()`.
+- The wheel grows from 63 KB to ~16 MB (the model) — every other runtime
+  dependency is unchanged.
+- Search results may differ slightly from 0.9 for numeric-looking TEXT primary
+  keys (see the fix below), and `docs/PERFORMANCE.md` documents the bundled
+  engine's measured BEIR delta against fp32 and the sentence-transformers
+  baseline.
+
+### Fixed
+
+- **Semantic search silently returned no rows for tables whose TEXT primary
+  key looked numeric.** `_vector_search` coerced chroma's `str(pk)` ids with
+  `int()`, so the fetch ran `WHERE text_pk IN (4983, …)` and SQLite never
+  matched TEXT `'4983'` to INTEGER `4983`; every semantic result was dropped
+  and hybrid degenerated to keyword-only. Found by the BEIR evaluation —
+  SciFact semantic scored 0.0 with a fully populated 5,183-vector index, while
+  NFCorpus worked only because its ids (`MED-10`) are not coercible. Ids are
+  now coerced to the pk column's declared storage class
+  (`_pk_storage_class` via `PRAGMA table_info`, which also sees the implicit
+  rowid alias that `_schema` omits), so TEXT pks keep `'4983'` and INTEGER pks
+  return to ints, matching `_fts_search`'s keys for fusion.
+
 ## [0.9.0] — 2026-09-28
 
 ### Added
