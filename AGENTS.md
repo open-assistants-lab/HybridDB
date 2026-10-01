@@ -153,6 +153,17 @@ time the default engine changes, run the BEIR gate
 (`tests/benchmarks/test_accuracy.py --run-benchmarks`) and update the delta
 table in `docs/PERFORMANCE.md`.
 
+**The default engine must stay dense — accepted trade, do not unwind it.** The
+23 MB bundled model was sized against a measured trade: it closed our exposure
+to the chromadb segfault and the 5.3× accuracy cliff. Evidence on the shipped
+0.10.0 wheel — same workload, only the embedder differing: the bundled engine
+survives 12k/30k upsert+delete cycles (5/5, 3/3) where the hash fallback died
+4/4, and a user-supplied sparse `embedding_fn` still segfaults 2/4. So do not
+replace the default with a sparse/cheap embedder, and do not add any lossy
+fallback: that re-opens both. Wheel size (~16 MB) is the price, accepted by the
+maintainer — if size ever becomes the priority again, the fix is a separate
+model package, not a smaller vector construct.
+
 **Numeric-looking TEXT primary keys need storage-class-aware ids.** Chroma ids
 are `str(pk)`; coercing them blindly with `int()` made `_vector_search` fetch
 `WHERE text_pk IN (4983, …)` and SQLite never matches TEXT '4983' to INTEGER

@@ -97,21 +97,38 @@ nothing stops a user from running that way.
 
 ## Remediation status
 
-The default path no longer produces word-hash vectors: as of the bundled-engine
-release, `default_embedding_fn` is the bundled uint8 MiniLM (dense, 0/8 clean
-at 30k upserts + 30k deletes), and `hash_embedding` is off the default path —
-it remains exported so the BEIR accuracy harness can still measure the cliff it
-represents. Consequently the HybridDB exposure from *our* fallback is gone; the
-remaining one is a caller passing a sparse `embedding_fn` of their own at
-volume, which the bundled note below covers.
+**Default-path exposure is closed, verified against the published wheel.**
+Since 0.10.0 the default engine is the bundled uint8 MiniLM. Re-ran the exact
+workload that produced 4/4 SIGSEGV with the hash fallback against
+`hybriddb==0.10.0` (chromadb 1.5.9), so the claim is testable on the artifact
+users install:
 
-Measured on the real HybridDB journal path (fallback forced, MiniLM
-unavailable) before the fix, for the record:
+```
+bundled uint8 (default engine, no embedding_fn):
+  12k upserts + 12k deletes (checkpoint/rollback): 5/5 COMPLETED   (was 4/4 SIGSEGV)
+  30k upserts + 30k deletes:                      3/3 COMPLETED
+
+same wheel, same workload, a caller-supplied SPARSE embedding_fn:
+  3k upserts + 3k deletes:                        2/4 SIGSEGV (rc 139)
+```
+
+One codebase, one workload, one chromadb; only vector density differs. The rule
+that keeps this closed is "the default engine must stay dense" — see AGENTS.md.
+
+`hash_embedding` is off the default path; it remains exported so the BEIR
+accuracy harness can measure the cliff it represents (5.3x, nDCG 0.059 vs
+0.343).
+
+Measured on the real journal path with the old fallback, for the record:
 
 - ~30k upserts **+ 30k deletes** (checkpoint/rollback) → **4/4 SIGSEGV**
 - ~30k upserts, no deletes → 5/5 clean
 - ~6k upserts + deletes → 5/5 clean
-- shipped default (MiniLM), dense, 30k + 30k → 5/5 clean
+
+The upstream chromadb bug itself is **still open and unfixed** (issue #5), and
+the wheel measurement above shows it remains reachable through a legitimate
+public API (a user's own sparse `embedding_fn`). The actionable next step is
+filing upstream with the pure-chromadb reproducer below.
 
 ## Do not attempt
 

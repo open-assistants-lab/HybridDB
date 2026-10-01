@@ -126,12 +126,26 @@ rm -rf dist
 uv build
 ```
 
-Expected files for version `0.10.0`:
+Expected files for version `0.10.0` (the wheel now carries the bundled 23 MB
+MiniLM engine, so it is ~16 MB rather than the historical 60–400 KB):
 
 ```text
-dist/hybriddb-0.10.0.tar.gz
-dist/hybriddb-0.10.0-py3-none-any.whl
+dist/hybriddb-0.10.0.tar.gz          (~17 MB)
+dist/hybriddb-0.10.0-py3-none-any.whl (~16 MB)
 ```
+
+The wheel smoke below deletes `~/.cache/chroma/onnx_models` first — the
+bundled engine must work with **no** cached model, or the offline promise is
+not being tested.
+
+> Keep `~/.cache/chroma/onnx_models` clean or removed for these checks. If a
+> cached model is present, verify the default label is
+> `hybriddb:all-MiniLM-L6-v2-uint8` — if resolution silently picked a
+> downloaded model instead, bundling has broken.
+
+The wheel smoke test should also use the **default engine** (no `embedding_fn`)
+at least once, and exercise a numeric-looking `TEXT` primary key in semantic
+mode — both were found defective in the past (#5 exposure and #6).
 
 ## Wheel Smoke Test
 

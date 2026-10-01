@@ -94,8 +94,11 @@ HybridDB does all of that once, done right.
 | Self-healing journal (crash recovery) | ✅ |
 | Import/export, backup/restore | ✅ |
 | Sync + async APIs | ✅ |
-| No external API dependencies (works offline) | ✅ |
+| No external API dependencies (works offline, bundled 23 MB model) | ✅ |
 | Embedding model pluggable (sentence-transformers, OpenAI, custom) | ✅ |
+
+> The bundled engine measures within 0.005 nDCG@10 of fp32 `all-MiniLM-L6-v2` on
+> BEIR (NFCorpus −0.0038 / SciFact +0.0031); see `docs/PERFORMANCE.md`.
 
 ## Documentation
 
@@ -109,7 +112,7 @@ HybridDB does all of that once, done right.
 pip install hybriddb
 ```
 
-HybridDB uses ChromaDB's bundled local MiniLM embedding by default. No API key required.
+HybridDB ships a bundled `all-MiniLM-L6-v2` embedding model (uint8, 23 MB) as its default engine — dense vectors, no API key, and no first-run download, so installs work fully offline.
 
 ## Core Concepts
 
@@ -218,7 +221,7 @@ result = db.reconcile("contacts")
 
 ## Custom Embedding Models
 
-By default, HybridDB uses ChromaDB's bundled local MiniLM embedding. Plug in any embedding function if you want a specific model or provider:
+By default, HybridDB uses a bundled `all-MiniLM-L6-v2` engine (uint8, offline, dense 384-d vectors). Plug in any embedding function if you want a different model or provider:
 
 ```python
 from sentence_transformers import SentenceTransformer
@@ -227,7 +230,9 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 db = HybridDB("./data", embedding_fn=lambda text: model.encode(text).tolist())
 ```
 
-Works with any embedding provider — OpenAI, Cohere, Hugging Face, local models.
+The default engine records `hybriddb:all-MiniLM-L6-v2-uint8` in `_schema`; a custom engine records `"custom"` (or your `embedding_model_name`). Switching engines on an existing store needs `force_model=True` + `reindex()`, because the vectors are not interchangeable.
+
+> If you provide your own `embedding_fn`, prefer a **dense** one. Sparse embedders (e.g. word-hash / bag-of-words) reproduce a hard segfault inside chromadb 1.5.9's native upsert path at volume — `docs/notes/2026-09-28-chromadb-rust-bindings-segfault.md`.
 
 ## Built On
 

@@ -5,7 +5,7 @@ This document describes the stable public API for HybridDB `0.8.x`.
 HybridDB is one embedded database object that coordinates SQLite, FTS5, ChromaDB, a self-healing journal, optional DuckDB analytics, and optional graph helpers.
 
 > Source of truth: the code in `hybriddb/`. This file is verified against the
-> implementation and the changelog as of `0.8.0` (2026-09-03).
+> implementation and the changelog as of `0.10.0` (2026-09-30).
 
 ## Imports
 
@@ -33,7 +33,8 @@ semantic search); `INTEGER`, `REAL`, `BOOLEAN`, `JSON` are plain SQLite columns.
 `KEYWORD`, `SEMANTIC`, `HYBRID` are `SearchMode` enum aliases. `Column(type,
 constraints)` is a typed schema helper for `create_table()`.
 `EmbeddingModelError` is raised when the configured embedding model cannot be
-loaded; `default_embedding_fn` is ChromaDB's bundled local MiniLM embedding.
+loaded; `default_embedding_fn` is the bundled uint8 `all-MiniLM-L6-v2` engine
+(see [Embedding models](#embedding-models)).
 
 ## Constructor
 
@@ -574,3 +575,33 @@ Private/internal API:
 - Private internals may change between minor versions.
 
 Use `cursor()` instead of `_connect()` and `process_journal()` instead of `_process_journal()`.
+
+## Embedding Models
+
+The default engine **ships inside the package** — `all-MiniLM-L6-v2` quantized
+per-channel to uint8 (22.9 MB), loaded through a vendored onnxruntime loader
+that pins `CPUExecutionProvider` and pads to the batch rather than a global 256
+tokens. It is dense, deterministic, requires no network, and was measured
+against fp32 through the identical HybridDB pipeline on BEIR:
+
+```
+NFCorpus  semantic nDCG@10 0.3149 -> 0.3111 (𝛥 -0.0038)
+          hybrid   nDCG@10 0.3429 -> 0.3405 (𝛥 -0.0024)
+SciFact   semantic nDCG@10 0.6451 -> 0.6445 (𝛥 -0.0006)
+          hybrid   nDCG@10 0.7022 -> 0.7053 (𝛥 +0.0031)
+```
+
+`hybriddb.embedding.default_embedding_fn(text)` embeds a single string;
+`hybriddb.embedding.default_model_label()` returns the label that goes into
+`_schema`. Because a store's label must describe the vectors it holds, these
+rules apply:
+
+| Rule | Detail |
+|---|---|
+| Labels are truthful | The bundled engine records `hybriddb:all-MiniLM-L6-v2-uint8`; Chroma's fp32 runtime model records `chroma:all-MiniLM-L6-v2`; a supplied `embedding_fn` records `"custom"` unless `embedding_model_name` is given. The pre-0.10 behaviour — reporting chroma's label while writing hash vectors — was a bug. |
+| MiniLM labels are equivalent | Both MiniLM labels are the same model in the same vector space (max component delta 0.031, cosine 0.988+), so a store can open under either without `force_model`. |
+| No silent fallback | If neither the bundled nor the Chroma fp32 engine can load, `HybridDB(...)` raises `EmbeddingModelError` with the fix in the message. There is no hash-vector fallback: it measured a 5.3× accuracy cliff on BEIR and is the construct behind the chromadb segfault (`docs/notes/2026-09-28-chromadb-rust-bindings-segfault.md`). |
+| Prefer dense `embedding_fn`s | A sparse embedder (word-hash / bag-of-words) reproduces a hard SIGSEGV inside chromadb 1.5.9's native upsert path at volume; see the note above. |
+
+Provenance, SHA-256s, and licence attribution for the bundled weights live in
+`hybriddb/models/all-MiniLM-L6-v2-uint8/NOTICE.md`.

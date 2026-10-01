@@ -94,6 +94,20 @@ benchmark used by MTEB and embedding-model papers:
 - **NFCorpus** — 3,633 medical documents, 324 test queries, graded relevance (0-3)
 - **SciFact** — 5,183 scientific abstracts, 301 test queries, binary relevance
 
+Reproducing the bundled-uint8-vs-fp32 accuracy comparison used for the 0.10.0
+default-engine decision:
+
+```bash
+uv run python -u scripts/beir_bundle_eval.py
+```
+
+`scripts/beir_bundle_eval.py` embeds through the vendored loader
+(`scripts/speedup_probe.MiniLM`), which was verified to produce vectors
+**identical** to Chroma's `ONNXMiniLM_L6_V2` (cosine 1.0, max abs diff 0.0) but
+~6× faster per row, because it pads to the batch instead of a global 256
+tokens. The measured comparison and the acceptance rule live in
+`docs/RELEASE.md` and `docs/PERFORMANCE.md`.
+
 ```bash
 uv run python -m pytest tests/benchmarks/test_accuracy.py -q --run-benchmarks --benchmark-disable
 ```
